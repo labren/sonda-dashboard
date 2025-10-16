@@ -1,0 +1,8 @@
+apache-airflow-providers-ftp
+pandas
+pyarrow 
+duckdb
+redis==4.5.5
+streamlit
+pvlib
+timezonefinder==5.2.0

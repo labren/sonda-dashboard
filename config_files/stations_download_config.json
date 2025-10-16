@@ -1,0 +1,52 @@
+{
+    "ptr": {
+        "name": "Petrolina",
+        "files": ["PTR_SD.DAT", "PTR_MD.DAT", "PTR_WD.DAT"],
+        "enabled": true
+    },
+    "cpa": {
+        "name": "Cachoeira Paulista",
+        "files": ["CPA_SD.DAT", "CPA_MD.DAT"],
+        "enabled": true
+    },
+    "sms": {
+        "name": "Sao Martinho da Serra",
+        "files": ["SMS_SD.DAT", "SMS_MD.DAT"],
+        "enabled": true
+    },
+    "nat": {
+        "name": "Natal",
+        "files": ["NAT_SD.DAT", "NAT_MD.DAT", "NAT_TD.DAT"],
+        "enabled": true
+    },
+    "cgr": {
+        "name": "Campo Grande",
+        "files": ["CGR_SD.DAT", "CGR_MD.DAT"],
+        "enabled": true
+    },
+    "orn": {
+        "name": "Ourinhos",
+        "files": ["ORN_WD.DAT", "ORN_MD.DAT"],
+        "enabled": true
+    },
+    "sjc": {
+        "name": "Sao Jose dos Campos",
+        "files": ["SJC_SD.DAT", "SJC_MD.DAT"],
+        "enabled": true
+    },
+    "cai": {
+        "name": "Caiçara",
+        "files": ["CAI_SD.DAT", "CAI_MD.DAT"],
+        "enabled": true
+    },
+    "pma":{
+        "name":"Palmas",
+        "files":["PMA_MD.DAT","PMA_SD.DAT" ],
+        "enabled":true
+    },
+    "stm":{
+        "name":"Santa Maria",
+        "files":["STM_MD.DAT","STM_SD.DAT" ],
+        "enabled":true
+    }
+}
