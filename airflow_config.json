@@ -6,7 +6,7 @@
         "timeout_minutes": {
             "download": 5,
             "process": 10
-        }
+        }        
     },
     "dags": {
         "download_dag": "ftp_multi_station_download",

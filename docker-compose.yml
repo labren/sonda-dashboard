@@ -346,7 +346,6 @@ services:
     volumes:
       - ./:/opt/airflow
       - ./data:/opt/airflow/data
-      - ./airflow.db:/opt/airflow/airflow.db
     environment:
       - STREAMLIT_SERVER_PORT=8501
       - STREAMLIT_SERVER_ADDRESS=0.0.0.0
@@ -360,6 +359,11 @@ services:
       - AIRFLOW_BASE_URL=http://airflow-apiserver:8080
       - AIRFLOW_USERNAME=airflow
       - AIRFLOW_PASSWORD=airflow
+      # Override Airflow database configuration to use PostgreSQL
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__EXECUTOR=CeleryExecutor
+      - AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://airflow:airflow@postgres/airflow
+      - AIRFLOW__CELERY__BROKER_URL=redis://:@redis:6379/0
     user: "${AIRFLOW_UID:-50000}:0"
     depends_on:
       - airflow-apiserver
