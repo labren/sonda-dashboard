@@ -6,9 +6,9 @@
 echo "🐳 Starting Solar Data Monitor with Docker"
 echo "=========================================="
 
-# Check if docker-compose is available
-if ! command -v docker-compose &> /dev/null; then
-    echo "❌ docker-compose is not installed. Please install it first:"
+# Check if docker compose is available
+if ! command -v docker compose &> /dev/null; then
+    echo "❌ docker compose is not installed. Please install it first:"
     echo "   https://docs.docker.com/compose/install/"
     exit 1
 fi
@@ -73,7 +73,7 @@ echo "  - Streamlit dashboard (port 8501)"
 echo ""
 
 # Start the services
-docker-compose up -d
+docker compose up -d
 
 echo ""
 echo "⏳ Waiting for services to start up..."
@@ -117,11 +117,11 @@ echo "   2. Process the data"
 echo "   3. Update the dashboard"
 echo ""
 echo "📋 Useful commands:"
-echo "   View logs: docker-compose logs -f streamlit"
-echo "   Stop services: docker-compose down"
-echo "   Restart: docker-compose restart"
+echo "   View logs: docker compose logs -f streamlit"
+echo "   Stop services: docker compose down"
+echo "   Restart: docker compose restart"
 echo ""
 echo "Press Ctrl+C to stop all services"
 
 # Keep the script running and show logs
-docker-compose logs -f streamlit
+docker compose logs -f streamlit
