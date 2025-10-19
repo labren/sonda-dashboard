@@ -37,7 +37,7 @@
     "cai": {
         "name": "Caiçara",
         "files": ["CAI_SD.DAT", "CAI_MD.DAT"],
-        "enabled": true
+        "enabled": false
     },
     "pma":{
         "name":"Palmas",

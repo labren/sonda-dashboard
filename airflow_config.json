@@ -1,17 +1,18 @@
 {
     "airflow": {
-        "base_url": "http://airflow-apiserver:8080",
+        "base_url": "http://localhost:8082",
         "username": "airflow",
         "password": "airflow",
         "timeout_minutes": {
-            "download": 5,
-            "process": 10
+            "download": 60,
+            "process": 30
         }        
     },
     "dags": {
         "download_dag": "ftp_multi_station_download",
         "process_dag": "process_multistation_data",
-        "header_discovery_dag": "header_discovery_dag"
+        "header_discovery_dag": "header_discovery_dag",
+        "initial_setup_dag": "initial_data_setup"
     },
     "refresh_pipeline": {
         "auto_refresh_cache": true,

@@ -1,0 +1,15 @@
+{
+    "ftp_connections": {
+        "solter.ftp.1": {
+            "conn_type": "ftp",
+            "host": "ftp.example.com",
+            "port": 21,
+            "login": "your-username",
+            "password": "your-password",
+            "extra": {
+                "passive": true,
+                "secure": false
+            }
+        }
+    }
+}
