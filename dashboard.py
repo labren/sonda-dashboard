@@ -187,19 +187,22 @@ def get_latest_files_for_station_cached(station):
     return latest_files
 
 def filter_last_72_hours(df, timestamp_col='TIMESTAMP'):
-    """Filter dataframe to last 72 hours of data - OPTIMIZED"""
+    """Filter dataframe to last 72 hours of data"""
     if timestamp_col not in df.columns:
-        return df
+            return df
     
     # Ensure timestamp column is datetime
     if not pd.api.types.is_datetime64_any_dtype(df[timestamp_col]):
-        df[timestamp_col] = pd.to_datetime(df[timestamp_col], errors='coerce')
+                df[timestamp_col] = pd.to_datetime(df[timestamp_col], errors='coerce')
     
-    # Get cutoff time (72 hours ago)
-    cutoff_time = datetime.now() - timedelta(hours=72)
+    # Get current time and 72 hours ago
+    now = datetime.now()
+    cutoff_time = now - timedelta(hours=72)
     
-    # Filter data to last 72 hours - use boolean indexing (no copy)
-    return df[df[timestamp_col] >= cutoff_time]
+    # Filter data to last 72 hours
+    filtered_df = df[df[timestamp_col] >= cutoff_time].copy()
+    
+    return filtered_df
 
 @st.cache_data(ttl=15)  # Cache for 15 seconds - reduced for faster detection of new data
 def load_latest_data_for_station_cached(station):
@@ -225,14 +228,8 @@ def load_latest_data_for_station_cached(station):
             # Fast timestamp conversion first
             df = safe_convert_timestamp_optimized(df)
             
-            # Check if data is recent (last 72 hours) - optimize by not copying
-            if 'TIMESTAMP' in df.columns:
-                now = datetime.now()
-                cutoff_time = now - timedelta(hours=72)
-                mask = df['TIMESTAMP'] >= cutoff_time
-                df_recent = df[mask]
-            else:
-                df_recent = df
+            # Check if data is recent (last 72 hours)
+            df_recent = filter_last_72_hours(df.copy())
             
             # If no recent data, use all available data but add warning
             if df_recent.empty:
@@ -283,17 +280,14 @@ def clean_numeric_columns_optimized(df):
     object_cols = df.select_dtypes(include=['object']).columns
     exclude_cols = {'TIMESTAMP', 'source_file', 'station', 'data_type', 'file_path'}
     
-    # Filter out excluded columns upfront
-    cols_to_convert = [col for col in object_cols if col not in exclude_cols]
-    
-    if not cols_to_convert:
-        return df
-    
-    # Process columns in batch for better performance
-    for col in cols_to_convert:
+    # Process only a few columns at a time to avoid memory issues
+    for col in object_cols:
+        if col in exclude_cols:
+            continue
+            
         try:
-            # Fast numeric conversion - don't downcast as it's slower
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+            # Fast numeric conversion with downcast
+            df[col] = pd.to_numeric(df[col], errors='coerce', downcast='float')
         except:
             continue
     
@@ -321,48 +315,55 @@ def safe_convert_timestamp_optimized(df, timestamp_col='TIMESTAMP'):
     return df
 
 @st.cache_data(ttl=600)  # Cache clear sky calculations for 10 minutes
-def calculate_clearsky_ineichen_cached(df, latitude, longitude, altitude=0, tz='America/Sao_Paulo'):
+def calculate_clearsky_ineichen_cached(df, latitude, longitude, altitude=0, tz=None):
     """Cached clear sky calculations (for last 24 hours data) - OPTIMIZED"""
-    # Early return if already has clear sky data
-    if 'clearsky_GHI' in df.columns:
+    # Skip if already has clear sky data
+    if any(col in df.columns for col in ['clearsky_GHI', 'clearsky_DNI', 'clearsky_DHI']):
         return df
     
-    # Early return if no timestamp column
-    if 'TIMESTAMP' not in df.columns:
-        return df
-    
-    # Work on a copy to avoid side effects
     df = df.copy()
     
-    # Fast datetime conversion
-    if not pd.api.types.is_datetime64_any_dtype(df['TIMESTAMP']):
-        df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], errors='coerce')
+    # Find timestamp column
+    timestamp_col = 'TIMESTAMP'
+    if 'TIMESTAMP' not in df.columns:
+        possible_timestamp_cols = ['TIMESTAMP', 'timestamp', 'time', 'date', 'datetime']
+        for col in possible_timestamp_cols:
+            if col in df.columns:
+                timestamp_col = col
+                df = df.rename(columns={col: 'TIMESTAMP'})
+                break
+        else:
+            return df  # Return original if no timestamp
     
-    # Remove invalid timestamps
+    # Fast datetime conversion
+    df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], errors='coerce')
     df = df.dropna(subset=['TIMESTAMP'])
     
-    if df.empty or len(df) == 0:
+    if df.empty:
         return df
 
+    # Use default timezone if not provided
+    if tz is None:
+        tz = 'America/Sao_Paulo'  # Default to Brazil timezone
+
+    # Timezone handling - simplified
+    if df['TIMESTAMP'].dt.tz is None:
+        df['TIMESTAMP'] = df['TIMESTAMP'].dt.tz_localize('UTC').dt.tz_convert(tz)
+
+    # Set index for pvlib
+    df_indexed = df.set_index('TIMESTAMP')
+
     try:
-        # Timezone handling - simplified and faster
-        if df['TIMESTAMP'].dt.tz is None:
-            df['TIMESTAMP'] = df['TIMESTAMP'].dt.tz_localize('UTC', errors='coerce').dt.tz_convert(tz)
-        
-        # Set index for pvlib
-        df_indexed = df.set_index('TIMESTAMP')
-        
         # Create location and calculate clear sky
         location = Location(latitude, longitude, tz=tz, altitude=altitude)
-        clearsky = location.get_clearsky(df_indexed.index, model='ineichen')
-        
-        # Add clear sky data efficiently
+        clearsky = location.get_clearsky(df_indexed.index)
+
+        # Add clear sky data
         df['clearsky_GHI'] = clearsky['ghi'].values
         df['clearsky_DNI'] = clearsky['dni'].values
         df['clearsky_DHI'] = clearsky['dhi'].values
-        
     except Exception:
-        # If clear sky calculation fails, return original data silently
+        # If clear sky calculation fails, return original data
         pass
 
     return df
@@ -371,17 +372,11 @@ def calculate_clearsky_ineichen_cached(df, latitude, longitude, altitude=0, tz='
 # OPTIMIZED UTILITY FUNCTIONS
 # =============================================================================
 
-@functools.lru_cache(maxsize=128)
-def get_exclude_cols_set():
-    """Cache the exclude columns set"""
-    return {'TIMESTAMP', 'source_file', 'station', 'data_type', 'file_path', 
-            'Id', 'Min', 'RECORD', 'Year', 'Jday'}
-
 def get_available_variables_optimized(df):
-    """Optimized variable extraction with caching"""
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
-    exclude_cols = get_exclude_cols_set()
-    # Use set operations for faster filtering
+    """Optimized variable extraction"""
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    exclude_cols = {'TIMESTAMP', 'source_file', 'station', 'data_type', 'file_path', 
+                   'Id', 'Min', 'RECORD', 'Year', 'Jday'}
     return [col for col in numeric_cols if col not in exclude_cols]
 
 def create_variable_selector_optimized(available_vars, default_vars, key_prefix):
@@ -403,45 +398,34 @@ def plot_selected_variables_optimized(df, selected_vars, plot_title, height=300)
         st.error(f"❌ Timestamp data not available for {plot_title}")
         return False
                 
-    # Check for missing variables - optimized with set operations
-    selected_vars_set = set(selected_vars)
-    available_vars_set = set(df.columns)
-    missing_vars = selected_vars_set - available_vars_set
-    
+    # Check for missing variables
+    missing_vars = [var for var in selected_vars if var not in df.columns]
     if missing_vars:
-        available_vars = list(selected_vars_set & available_vars_set)
+        available_vars = [var for var in selected_vars if var in df.columns]
         if not available_vars:
             st.error(f"❌ None of the selected variables are available for {plot_title}")
             return False
         selected_vars = available_vars
-        # Only show info if something is missing
-        if len(missing_vars) < len(selected_vars_set):
-            st.info(f"ℹ️ Plotting available variables: {', '.join(selected_vars)}")
+        st.info(f"ℹ️ Plotting available variables: {', '.join(selected_vars)}")
     
     try:
-        # Optimized data preparation - use loc for faster column selection
-        cols_to_plot = ['TIMESTAMP'] + selected_vars
-        plot_data = df.loc[:, cols_to_plot].copy()
+        # Optimized data preparation - limit to essential columns
+        plot_data = df[['TIMESTAMP'] + selected_vars].copy()
         
-        # Fast data cleaning - drop NaT timestamps
+        # Fast data cleaning
         plot_data = plot_data.dropna(subset=['TIMESTAMP'])
+        plot_data = plot_data.set_index('TIMESTAMP')
+        
+        # Limit data points for better performance (max 1000 points)
+        if len(plot_data) > 1000:
+            plot_data = plot_data.iloc[::len(plot_data)//1000]
         
         if plot_data.empty:
             st.warning(f"⚠️ No valid data available for {plot_title}")
             return False
         
-        # Set index after cleaning
-        plot_data = plot_data.set_index('TIMESTAMP')
-        
-        # Limit data points for better performance (max 2000 points for smoother charts)
-        data_len = len(plot_data)
-        if data_len > 2000:
-            # Use integer step for faster slicing
-            step = data_len // 2000
-            plot_data = plot_data.iloc[::step]
-        
         # Create plot
-        st.line_chart(plot_data, height=height, use_container_width=True)
+        st.line_chart(plot_data, height=height, width='stretch')
         st.caption(f"📊 {plot_title}: {', '.join(selected_vars)} ({len(plot_data)} data points)")
         return True
         
@@ -497,19 +481,8 @@ if not available_stations:
     
     st.stop()
 
-# Get station metadata (cached) - single lookup
+# Get station metadata (cached)
 station_metadata = get_station_metadata_cached(available_stations)
-
-# Pre-filter station metadata for selected station (optimization)
-def get_station_info(station_name, metadata_df):
-    """Fast station info lookup"""
-    filtered = metadata_df[metadata_df['station'].str.lower() == station_name.lower()]
-    if not filtered.empty:
-        return {
-            'latitude': filtered['latitude'].values[0],
-            'longitude': filtered['longitude'].values[0]
-        }
-    return None
 
 # Station selector - Radio buttons in horizontal layout
 st.markdown("---")
@@ -538,31 +511,24 @@ if data_dict is not None and len(data_dict) > 0:
     # Display file information - optimized
     file_info = []
     for data_type, df in data_dict.items():
+        timestamp_col = 'TIMESTAMP'
         time_range = "N/A"
-        
-        # Fast timestamp range calculation
-        if 'TIMESTAMP' in df.columns and pd.api.types.is_datetime64_any_dtype(df['TIMESTAMP']):
-            try:
-                # Use numpy for faster min/max
-                timestamps = df['TIMESTAMP'].values
-                time_min = pd.Timestamp(timestamps.min())
-                time_max = pd.Timestamp(timestamps.max())
-                
-                # Check for NaT (Not a Time) values before formatting
-                if pd.notna(time_min) and pd.notna(time_max):
-                    time_range = f"{time_min.strftime('%m-%d %H:%M')} to {time_max.strftime('%m-%d %H:%M')}"
-            except:
+        if timestamp_col in df.columns and pd.api.types.is_datetime64_any_dtype(df[timestamp_col]):
+            # Use faster min/max operations
+            time_min = df[timestamp_col].min()
+            time_max = df[timestamp_col].max()
+            # Check for NaT (Not a Time) values before formatting
+            if pd.notna(time_min) and pd.notna(time_max):
+                time_range = f"{time_min.strftime('%m-%d %H:%M')} to {time_max.strftime('%m-%d %H:%M')}"
+            else:
                 time_range = "Invalid timestamps"
         
         # Get file modification time more efficiently
-        last_modified = "N/A"
-        if 'file_path' in df.columns:
-            try:
-                file_path = df['file_path'].iat[0]  # iat is faster than iloc for single value
-                if file_path and os.path.exists(file_path):
-                    last_modified = datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%m-%d %H:%M')
-            except:
-                pass
+        try:
+            file_path = df['file_path'].iloc[0] if 'file_path' in df.columns else ""
+            last_modified = datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%m-%d %H:%M') if file_path else "N/A"
+        except:
+            last_modified = "N/A"
             
         file_info.append({
             'Data Type': data_type,
@@ -572,25 +538,21 @@ if data_dict is not None and len(data_dict) > 0:
             'Last Modified': last_modified
         })
     
-    # Display metrics in columns
-    if file_info:
-        cols = st.columns(len(file_info))
-        for i, row in enumerate(file_info):
-            with cols[i]:
-                st.metric(
-                    label=f"{row['Data Type']} Data",
-                    value=f"{row['Records']:,}",
-                    delta=f"{row['Columns']} cols"
-                )
-                st.caption(f"Updated: {row['Last Modified']}")
+    # Display metrics
+    cols = st.columns(len(file_info))
+    for i, row in enumerate(file_info):
+        with cols[i]:
+            st.metric(
+                label=f"{row['Data Type']} Data",
+                value=f"{row['Records']:,}",
+                delta=f"{row['Columns']} cols"
+            )
+            st.caption(f"Updated: {row['Last Modified']}")
 
     # Data Visualization Section
     st.header("📈 Real-time Data Visualization")
     col1, col2, col3 = st.columns([1, 1, 1])
 
-    # Get station location info once for all visualizations
-    station_info = get_station_info(selected_station, station_metadata)
-    
     # Column 1: Solar Data (SD)
     with col1:
         st.subheader("☀️ Solar Data (SD)")
@@ -599,17 +561,18 @@ if data_dict is not None and len(data_dict) > 0:
             df = data_dict['SD'].copy()
             
             # Get station metadata for clear sky calculation (only if needed)
-            if station_info and any('glo' in var.lower() for var in df.columns):
+            if any('glo' in var.lower() for var in df.columns):
+                filtered_row = station_metadata[station_metadata['station'].str.lower() == selected_station.lower()]
+
+            if not filtered_row.empty:
                 try:
+                    latitude = filtered_row['latitude'].values[0]
+                    longitude = filtered_row['longitude'].values[0]
+                    
                     # Apply clear sky model (cached) - only for solar data
-                    df = calculate_clearsky_ineichen_cached(
-                        df, 
-                        station_info['latitude'], 
-                        station_info['longitude'], 
-                        tz='America/Sao_Paulo'
-                    )
-                except Exception:
-                    pass  # Silently skip clear sky if it fails
+                    df = calculate_clearsky_ineichen_cached(df, latitude, longitude, tz='America/Sao_Paulo')
+                except Exception as e:
+                    st.warning(f"⚠️ Could not calculate clear sky data: {str(e)}")
             
             available_vars = get_available_variables_optimized(df)
             
@@ -699,23 +662,24 @@ if data_dict is not None and len(data_dict) > 0:
         detailed_variables = []
         
         if 'SD' in data_dict:
-            # Reference the existing df instead of copying
-            df_sd = data_dict['SD']
+            df_sd = data_dict['SD'].copy()
+            
+            # Apply clear sky calculation if needed (only for solar data)
+            filtered_row = station_metadata[station_metadata['station'].str.lower() == selected_station.lower()]
+            if not filtered_row.empty:
+                try:
+                    latitude = filtered_row["latitude"].values[0]
+                    longitude = filtered_row["longitude"].values[0]
+                    df_sd = calculate_clearsky_ineichen_cached(df_sd, latitude, longitude, tz="America/Sao_Paulo")
+                except:
+                    pass                        
             
             available_vars_sd = get_available_variables_optimized(df_sd)
             
-            # Add variables to detailed view - use set operations for faster checking
-            solar_keywords = {'glo', 'dir', 'dif'}
-            stat_keywords = {'avg', 'std'}
-            
-            solar_vars = [
-                var for var in available_vars_sd 
-                if any(kw in var.lower() for kw in solar_keywords) 
-                and any(kw in var.lower() for kw in stat_keywords)
-            ]
+            # Add variables to detailed view
+            solar_vars = [var for var in available_vars_sd if any(x in var.lower() for x in ['glo', 'dir', 'dif']) and any(x in var.lower() for x in ['avg', 'std'])]
             detailed_variables.extend([f"SD: {var}" for var in solar_vars])
             
-            # Add clearsky variables if they exist
             clearsky_vars = ['clearsky_GHI', 'clearsky_DNI', 'clearsky_DHI']
             available_clearsky_vars = [var for var in clearsky_vars if var in df_sd.columns]
             detailed_variables.extend([f"SD: {var}" for var in available_clearsky_vars])
@@ -729,54 +693,31 @@ if data_dict is not None and len(data_dict) > 0:
             
             if selected_detailed_var:
                 data_type, var_name = selected_detailed_var.split(": ", 1)
-                df_detail = data_dict[data_type]
+                df_detail = data_dict[data_type].copy()
                 
                 if 'TIMESTAMP' in df_detail.columns and var_name in df_detail.columns:
                     st.write(f"**{var_name} ({data_type})**")
                     
-                    # Optimize plot data preparation
-                    plot_data = df_detail.loc[:, ['TIMESTAMP', var_name]].dropna()
+                    plot_data = df_detail[['TIMESTAMP', var_name]].set_index('TIMESTAMP')
+                    st.line_chart(plot_data, height=400, width='stretch')
                     
-                    if not plot_data.empty:
-                        plot_data = plot_data.set_index('TIMESTAMP')
-                        
-                        # Downsample if too many points
-                        if len(plot_data) > 2000:
-                            step = len(plot_data) // 2000
-                            plot_data = plot_data.iloc[::step]
-                        
-                        st.line_chart(plot_data, height=400, use_container_width=True)
-                        
-                        # Show statistics - use numpy for faster calculations
-                        var_data = df_detail[var_name].dropna()
-                        if len(var_data) > 0:
-                            col_stat1, col_stat2 = st.columns(2)
-                            with col_stat1:
-                                st.metric("Mean", f"{var_data.mean():.2f}")
-                                st.metric("Min", f"{var_data.min():.2f}")
-                            with col_stat2:
-                                st.metric("Max", f"{var_data.max():.2f}")
-                                st.metric("Std Dev", f"{var_data.std():.2f}")
-                    else:
-                        st.warning("No valid data to display")
+                    # Show statistics
+                    col_stat1, col_stat2 = st.columns(2)
+                    with col_stat1:
+                        st.metric("Mean", f"{df_detail[var_name].mean():.2f}")
+                        st.metric("Min", f"{df_detail[var_name].min():.2f}")
+                    with col_stat2:
+                        st.metric("Max", f"{df_detail[var_name].max():.2f}")
+                        st.metric("Std Dev", f"{df_detail[var_name].std():.2f}")
         else:
             st.info("No variables available for detailed view.")
 
-    # Raw Data Section (collapsible) - optimized for performance
+    # Raw Data Section (collapsible)
     with st.expander("📋 Raw Data (Click to expand)"):
         for data_type, df in data_dict.items():
             st.write(f"**{selected_station.upper()} - {data_type} Data**")
-            st.write(f"Shape: {df.shape[0]:,} rows × {df.shape[1]} columns")
-            
-            # Only show first 50 rows for better performance
-            display_df = df.head(50)
-            
-            # Select only important columns to display (exclude metadata)
-            cols_to_show = [col for col in display_df.columns if col not in {'source_file', 'station', 'data_type', 'file_path'}]
-            if cols_to_show:
-                st.dataframe(display_df[cols_to_show], use_container_width=True, height=300)
-            else:
-                st.dataframe(display_df, use_container_width=True, height=300)
+            st.write(f"Shape: {df.shape}")
+            st.dataframe(df.head(20), width='stretch')
 
 else:
     st.error(f"❌ No recent data available for station '{selected_station.upper()}'")
@@ -833,12 +774,12 @@ else:
             st.warning("🚨 **No Data Files Found**")
             st.markdown("""
             **No processed data files exist for this station.**
-            
-            **Possible causes:**
+    
+    **Possible causes:**
             - Data processing pipeline has not completed yet
             - Processing failed for this station
-            
-            **What to do:**
+    
+    **What to do:**
             1. Check Airflow logs for processing errors
             2. Run the processing pipeline via Airflow
             """)
@@ -863,7 +804,7 @@ else:
         # Trigger complete data refresh
         docker-compose exec airflow-apiserver airflow dags trigger refresh_data_pipeline
         ```
-        """)
+    """)
 
 # Footer
 st.markdown("---")

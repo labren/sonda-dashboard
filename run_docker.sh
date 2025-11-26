@@ -94,7 +94,7 @@ done
 # Wait for Streamlit to be ready
 echo "🔍 Checking Streamlit status..."
 for i in {1..20}; do
-    if curl -s http://localhost:8501 > /dev/null 2>&1; then
+    if curl -s http://localhost:80 > /dev/null 2>&1; then
         echo "✅ Streamlit dashboard is ready!"
         break
     else
@@ -106,7 +106,7 @@ done
 echo ""
 echo "🎉 All services are running!"
 echo ""
-echo "📊 Dashboard: http://localhost:8501"
+echo "📊 Dashboard: http://localhost:80"
 echo "🌐 Airflow UI: http://localhost:8082"
 echo "   Username: airflow"
 echo "   Password: airflow"
