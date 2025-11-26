@@ -6,7 +6,7 @@ from plugins.file_saver_plugin import FileSaverOperator
 from plugins.raw_data_loader_plugin import RawDataLoaderOperator
 from plugins.data_transformer_plugin import DataTransformerOperator
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import json
 
@@ -209,6 +209,7 @@ with DAG(
         'owner': 'airflow',
         'depends_on_past': False,
         'retries': 1,
+        'retry_delay': timedelta(minutes=2),
         'start_date': datetime(2025, 1, 1),
     },
     description='Process raw data to interim format for multiple stations and sources',

@@ -4,7 +4,7 @@ from airflow.operators.empty import EmptyOperator
 
 from plugins.header_finder_plugin import HeaderFinderOperator, HeaderConfigUpdaterOperator
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import json
 
@@ -138,6 +138,7 @@ with DAG(
         'owner': 'airflow',
         'depends_on_past': False,
         'retries': 1,
+        'retry_delay': timedelta(minutes=2),
         'start_date': datetime(2025, 1, 1),
     },
     description='Discover missing headers from FTP files and update configuration',

@@ -3,14 +3,14 @@ from airflow.decorators import task
 from airflow.operators.empty import EmptyOperator
 from airflow.providers.ftp.hooks.ftp import FTPHook
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import deque
 import os
 import json
 
 # Constants
 FTP_CONN_ID = 'solter.ftp.1'
-DAYS_TO_KEEP = 1  # Keep 1 day (24 hours) for daily updates
+DAYS_TO_KEEP = 3  # Keep 3 days (72 hours) for dashboard display
 CONFIG_FILE = '/opt/airflow/config_files/stations_download_config.json'
 BASE_REMOTE_PATH = '/coleta'
 BASE_LOCAL_PATH = '/opt/airflow/data/raw'
@@ -19,7 +19,7 @@ BASE_LOCAL_PATH = '/opt/airflow/data/raw'
 
 def days_to_download(days: int) -> int:
     # Download data based on 1-minute intervals (60 minutes × 24 hours × days)
-    # 1 day = 1,440 lines (24 hours of 1-minute data)
+    # 3 days = 4,320 lines (72 hours of 1-minute data)
     return 60 * 24 * days
 
 @task
@@ -58,7 +58,7 @@ def get_station_files(config: dict) -> list:
         print(station_files)
     return station_files
 
-@task(retries=5, retry_delay=120, retry_exponential_backoff=True)
+@task(retries=5, retry_delay=timedelta(seconds=120), max_retry_delay=timedelta(hours=2))
 def download_station_file(station_file: dict):
     """Download a single station file with proper error handling and retries"""
     try:
@@ -72,7 +72,7 @@ def download_station_file(station_file: dict):
         import os
         os.makedirs(os.path.dirname(station_file['local_file']), exist_ok=True)
         
-        # Use a deque to keep only the last day's data (1,440 lines = 24 hours × 60 minutes)
+        # Use a deque to keep only the last N days' data
         last_lines = deque(maxlen=days_to_download(days=DAYS_TO_KEEP))
 
         def handle_binary(more_data):
@@ -117,7 +117,7 @@ with DAG(
         'owner': 'airflow',
         'depends_on_past': False,
         'retries': 1,
-        'retry_delay': 30,  # 30 seconds delay between retries
+        'retry_delay': timedelta(seconds=30),  # 30 seconds delay between retries
     },
     start_date=datetime(2025, 1, 1),
     schedule='@daily',

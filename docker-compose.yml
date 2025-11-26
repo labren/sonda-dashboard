@@ -342,7 +342,7 @@ services:
     build: .
     command: python -m streamlit run /opt/airflow/dashboard.py --server.port 8501 --server.address 0.0.0.0
     ports:
-      - "8501:8501"
+      - "80:8501"
     volumes:
       - ./:/opt/airflow
       - ./data:/opt/airflow/data

@@ -10,9 +10,6 @@ import pvlib
 from pvlib.location import Location
 from timezonefinder import TimezoneFinder
 import pytz
-import requests
-import time
-import json
 from typing import Dict, List, Optional
 import functools
 from pathlib import Path
@@ -114,7 +111,7 @@ st.markdown("""
 
 # Title
 st.markdown('<h1 class="main-header">Solar Data Monitor</h1>', unsafe_allow_html=True)
-st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #666;">Real-time Solar Radiation & Meteorological Data (Last 24 Hours)</p>', unsafe_allow_html=True)
+st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #666;">Solar Radiation & Meteorological Data (Preferably Last 72 Hours)</p>', unsafe_allow_html=True)
 
 
 # =============================================================================
@@ -163,51 +160,50 @@ def get_latest_files_for_station_cached(station):
     
     # Use pathlib for better performance
     station_path_obj = Path(station_path)
-    files = list(station_path_obj.glob("*.parquet"))
+    files = station_path_obj.glob("*.parquet")
     
-    # Group files by data type (SD, MD, WD)
-    files_by_type = {}
+    # Compile regex pattern once for better performance
+    pattern = re.compile(r'_([A-Z]{2})_\d{8}_\d{6}\.parquet$')
+    
+    # Group files by data type (SD, MD, WD) and track latest
+    latest_files = {}
+    
     for file in files:
         filename = file.name
         # Extract data type from filename
-        match = re.search(r'_([A-Z]{2})_\d{8}_\d{6}\.parquet$', filename)
+        match = pattern.search(filename)
         if match:
             data_type = match.group(1)
-            if data_type not in files_by_type:
-                files_by_type[data_type] = []
-            files_by_type[data_type].append(str(file))
-    
-    # Get the latest file for each data type
-    latest_files = {}
-    for data_type, file_list in files_by_type.items():
-        if file_list:
-            # Sort by modification time and get the latest
-            latest_file = max(file_list, key=os.path.getmtime)
-            latest_files[data_type] = latest_file
+            file_path = str(file)
+            
+            # Only keep the latest file for each data type
+            if data_type not in latest_files:
+                latest_files[data_type] = file_path
+            else:
+                # Compare modification times - only if needed
+                if os.path.getmtime(file_path) > os.path.getmtime(latest_files[data_type]):
+                    latest_files[data_type] = file_path
     
     return latest_files
 
-def filter_last_24_hours(df, timestamp_col='TIMESTAMP'):
-    """Filter dataframe to last 24 hours of data"""
+def filter_last_72_hours(df, timestamp_col='TIMESTAMP'):
+    """Filter dataframe to last 72 hours of data - OPTIMIZED"""
     if timestamp_col not in df.columns:
-            return df
+        return df
     
     # Ensure timestamp column is datetime
     if not pd.api.types.is_datetime64_any_dtype(df[timestamp_col]):
-                df[timestamp_col] = pd.to_datetime(df[timestamp_col], errors='coerce')
+        df[timestamp_col] = pd.to_datetime(df[timestamp_col], errors='coerce')
     
-    # Get current time and 24 hours ago
-    now = datetime.now()
-    cutoff_time = now - timedelta(hours=24)
+    # Get cutoff time (72 hours ago)
+    cutoff_time = datetime.now() - timedelta(hours=72)
     
-    # Filter data to last 24 hours
-    filtered_df = df[df[timestamp_col] >= cutoff_time].copy()
-    
-    return filtered_df
+    # Filter data to last 72 hours - use boolean indexing (no copy)
+    return df[df[timestamp_col] >= cutoff_time]
 
 @st.cache_data(ttl=15)  # Cache for 15 seconds - reduced for faster detection of new data
 def load_latest_data_for_station_cached(station):
-    """Load data from the latest files for a specific station - CACHED (Last 24 hours only)"""
+    """Load data from the latest files for a specific station - CACHED (Shows available data with warnings)"""
     latest_files = get_latest_files_for_station_cached(station)
     
     if not latest_files:
@@ -215,6 +211,7 @@ def load_latest_data_for_station_cached(station):
     
     data_dict = {}
     failed_files = []
+    old_data_warnings = []
     
     for data_type, file_path in latest_files.items():
         try:
@@ -228,30 +225,51 @@ def load_latest_data_for_station_cached(station):
             # Fast timestamp conversion first
             df = safe_convert_timestamp_optimized(df)
             
-            # Filter to last 24 hours BEFORE cleaning (much faster)
-            df = filter_last_24_hours(df)
+            # Check if data is recent (last 72 hours) - optimize by not copying
+            if 'TIMESTAMP' in df.columns:
+                now = datetime.now()
+                cutoff_time = now - timedelta(hours=72)
+                mask = df['TIMESTAMP'] >= cutoff_time
+                df_recent = df[mask]
+            else:
+                df_recent = df
             
-            if df.empty:
-                failed_files.append(f"{data_type} (no data in last 24 hours)")
-                continue
+            # If no recent data, use all available data but add warning
+            if df_recent.empty:
+                if 'TIMESTAMP' in df.columns:
+                    latest_timestamp = df['TIMESTAMP'].max()
+                    if pd.notna(latest_timestamp):
+                        hours_old = (datetime.now() - latest_timestamp).total_seconds() / 3600
+                        old_data_warnings.append(f"{data_type} (data is {hours_old:.0f}h old)")
+                    else:
+                        old_data_warnings.append(f"{data_type} (invalid timestamps)")
+                # Use all available data
+                df_to_use = df
+            else:
+                # Use recent data
+                df_to_use = df_recent
             
             # Only clean numeric columns if we have data
-            df = clean_numeric_columns_optimized(df)
+            df_to_use = clean_numeric_columns_optimized(df_to_use)
             
-            # Add minimal metadata
-            df['source_file'] = os.path.basename(file_path)
-            df['station'] = station
-            df['data_type'] = data_type
-            df['file_path'] = file_path
+            # Add minimal metadata - more efficient
+            df_to_use.loc[:, 'source_file'] = os.path.basename(file_path)
+            df_to_use.loc[:, 'station'] = station
+            df_to_use.loc[:, 'data_type'] = data_type
+            df_to_use.loc[:, 'file_path'] = file_path
             
-            data_dict[data_type] = df
+            data_dict[data_type] = df_to_use
             
         except Exception as e:
             failed_files.append(f"{data_type} (error: {str(e)[:50]}...)")
             continue
     
+    # Show warnings for old data
+    if old_data_warnings:
+        st.warning(f"⚠️ Showing older data for station {station.upper()}: {', '.join(old_data_warnings)}")
+    
     if failed_files:
-        st.warning(f"⚠️ Could not load some data files for station {station.upper()}: {', '.join(failed_files)}")
+        st.info(f"ℹ️ Could not load some data files for station {station.upper()}: {', '.join(failed_files)}")
     
     return data_dict if data_dict else None
 
@@ -265,14 +283,17 @@ def clean_numeric_columns_optimized(df):
     object_cols = df.select_dtypes(include=['object']).columns
     exclude_cols = {'TIMESTAMP', 'source_file', 'station', 'data_type', 'file_path'}
     
-    # Process only a few columns at a time to avoid memory issues
-    for col in object_cols:
-        if col in exclude_cols:
-            continue
-            
+    # Filter out excluded columns upfront
+    cols_to_convert = [col for col in object_cols if col not in exclude_cols]
+    
+    if not cols_to_convert:
+        return df
+    
+    # Process columns in batch for better performance
+    for col in cols_to_convert:
         try:
-            # Fast numeric conversion with downcast
-            df[col] = pd.to_numeric(df[col], errors='coerce', downcast='float')
+            # Fast numeric conversion - don't downcast as it's slower
+            df[col] = pd.to_numeric(df[col], errors='coerce')
         except:
             continue
     
@@ -300,55 +321,48 @@ def safe_convert_timestamp_optimized(df, timestamp_col='TIMESTAMP'):
     return df
 
 @st.cache_data(ttl=600)  # Cache clear sky calculations for 10 minutes
-def calculate_clearsky_ineichen_cached(df, latitude, longitude, altitude=0, tz=None):
+def calculate_clearsky_ineichen_cached(df, latitude, longitude, altitude=0, tz='America/Sao_Paulo'):
     """Cached clear sky calculations (for last 24 hours data) - OPTIMIZED"""
-    # Skip if already has clear sky data
-    if any(col in df.columns for col in ['clearsky_GHI', 'clearsky_DNI', 'clearsky_DHI']):
+    # Early return if already has clear sky data
+    if 'clearsky_GHI' in df.columns:
         return df
     
+    # Early return if no timestamp column
+    if 'TIMESTAMP' not in df.columns:
+        return df
+    
+    # Work on a copy to avoid side effects
     df = df.copy()
     
-    # Find timestamp column
-    timestamp_col = 'TIMESTAMP'
-    if 'TIMESTAMP' not in df.columns:
-        possible_timestamp_cols = ['TIMESTAMP', 'timestamp', 'time', 'date', 'datetime']
-        for col in possible_timestamp_cols:
-            if col in df.columns:
-                timestamp_col = col
-                df = df.rename(columns={col: 'TIMESTAMP'})
-                break
-        else:
-            return df  # Return original if no timestamp
-    
     # Fast datetime conversion
-    df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], errors='coerce')
+    if not pd.api.types.is_datetime64_any_dtype(df['TIMESTAMP']):
+        df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], errors='coerce')
+    
+    # Remove invalid timestamps
     df = df.dropna(subset=['TIMESTAMP'])
     
-    if df.empty:
+    if df.empty or len(df) == 0:
         return df
 
-    # Use default timezone if not provided
-    if tz is None:
-        tz = 'America/Sao_Paulo'  # Default to Brazil timezone
-
-    # Timezone handling - simplified
-    if df['TIMESTAMP'].dt.tz is None:
-        df['TIMESTAMP'] = df['TIMESTAMP'].dt.tz_localize('UTC').dt.tz_convert(tz)
-
-    # Set index for pvlib
-    df_indexed = df.set_index('TIMESTAMP')
-
     try:
+        # Timezone handling - simplified and faster
+        if df['TIMESTAMP'].dt.tz is None:
+            df['TIMESTAMP'] = df['TIMESTAMP'].dt.tz_localize('UTC', errors='coerce').dt.tz_convert(tz)
+        
+        # Set index for pvlib
+        df_indexed = df.set_index('TIMESTAMP')
+        
         # Create location and calculate clear sky
         location = Location(latitude, longitude, tz=tz, altitude=altitude)
-        clearsky = location.get_clearsky(df_indexed.index)
-
-        # Add clear sky data
+        clearsky = location.get_clearsky(df_indexed.index, model='ineichen')
+        
+        # Add clear sky data efficiently
         df['clearsky_GHI'] = clearsky['ghi'].values
         df['clearsky_DNI'] = clearsky['dni'].values
         df['clearsky_DHI'] = clearsky['dhi'].values
+        
     except Exception:
-        # If clear sky calculation fails, return original data
+        # If clear sky calculation fails, return original data silently
         pass
 
     return df
@@ -357,11 +371,17 @@ def calculate_clearsky_ineichen_cached(df, latitude, longitude, altitude=0, tz=N
 # OPTIMIZED UTILITY FUNCTIONS
 # =============================================================================
 
+@functools.lru_cache(maxsize=128)
+def get_exclude_cols_set():
+    """Cache the exclude columns set"""
+    return {'TIMESTAMP', 'source_file', 'station', 'data_type', 'file_path', 
+            'Id', 'Min', 'RECORD', 'Year', 'Jday'}
+
 def get_available_variables_optimized(df):
-    """Optimized variable extraction"""
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    exclude_cols = {'TIMESTAMP', 'source_file', 'station', 'data_type', 'file_path', 
-                   'Id', 'Min', 'RECORD', 'Year', 'Jday'}
+    """Optimized variable extraction with caching"""
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    exclude_cols = get_exclude_cols_set()
+    # Use set operations for faster filtering
     return [col for col in numeric_cols if col not in exclude_cols]
 
 def create_variable_selector_optimized(available_vars, default_vars, key_prefix):
@@ -383,34 +403,45 @@ def plot_selected_variables_optimized(df, selected_vars, plot_title, height=300)
         st.error(f"❌ Timestamp data not available for {plot_title}")
         return False
                 
-    # Check for missing variables
-    missing_vars = [var for var in selected_vars if var not in df.columns]
+    # Check for missing variables - optimized with set operations
+    selected_vars_set = set(selected_vars)
+    available_vars_set = set(df.columns)
+    missing_vars = selected_vars_set - available_vars_set
+    
     if missing_vars:
-        available_vars = [var for var in selected_vars if var in df.columns]
+        available_vars = list(selected_vars_set & available_vars_set)
         if not available_vars:
             st.error(f"❌ None of the selected variables are available for {plot_title}")
             return False
         selected_vars = available_vars
-        st.info(f"ℹ️ Plotting available variables: {', '.join(selected_vars)}")
+        # Only show info if something is missing
+        if len(missing_vars) < len(selected_vars_set):
+            st.info(f"ℹ️ Plotting available variables: {', '.join(selected_vars)}")
     
     try:
-        # Optimized data preparation - limit to essential columns
-        plot_data = df[['TIMESTAMP'] + selected_vars].copy()
+        # Optimized data preparation - use loc for faster column selection
+        cols_to_plot = ['TIMESTAMP'] + selected_vars
+        plot_data = df.loc[:, cols_to_plot].copy()
         
-        # Fast data cleaning
+        # Fast data cleaning - drop NaT timestamps
         plot_data = plot_data.dropna(subset=['TIMESTAMP'])
-        plot_data = plot_data.set_index('TIMESTAMP')
-        
-        # Limit data points for better performance (max 1000 points)
-        if len(plot_data) > 1000:
-            plot_data = plot_data.iloc[::len(plot_data)//1000]
         
         if plot_data.empty:
             st.warning(f"⚠️ No valid data available for {plot_title}")
             return False
         
+        # Set index after cleaning
+        plot_data = plot_data.set_index('TIMESTAMP')
+        
+        # Limit data points for better performance (max 2000 points for smoother charts)
+        data_len = len(plot_data)
+        if data_len > 2000:
+            # Use integer step for faster slicing
+            step = data_len // 2000
+            plot_data = plot_data.iloc[::step]
+        
         # Create plot
-        st.line_chart(plot_data, height=height, width='stretch')
+        st.line_chart(plot_data, height=height, use_container_width=True)
         st.caption(f"📊 {plot_title}: {', '.join(selected_vars)} ({len(plot_data)} data points)")
         return True
         
@@ -419,409 +450,11 @@ def plot_selected_variables_optimized(df, selected_vars, plot_title, height=300)
         return False
 
 
-def refresh_data_pipeline(airflow_client, selected_station: str = None) -> Dict[str, bool]:
-    """
-    Execute the complete data refresh pipeline using the new refresh_data_pipeline DAG:
-    1. Trigger the refresh pipeline DAG
-    2. Monitor the pipeline progress
-    """
-    logger.info("Starting refresh data pipeline")
     
-    results = {
-        'pipeline': False,
-        'overall': False
-    }
-    
-    if not airflow_client.connected:
-        logger.error("Not connected to Airflow")
-        st.error("❌ Not connected to Airflow. Please check your connection settings.")
-        return results
-    
-    try:
-        # Trigger the refresh pipeline DAG
-        logger.info("Triggering refresh_data_pipeline DAG")
-        st.info("🔄 Triggering complete data refresh pipeline...")
-        
-        pipeline_success = airflow_client.trigger_dag('refresh_data_pipeline')
-        results['pipeline'] = pipeline_success
-        
-        if not pipeline_success:
-            logger.error("Failed to trigger refresh pipeline DAG")
-            st.error("❌ Failed to trigger refresh pipeline DAG")
-            return results
-            
-        logger.info("Refresh pipeline DAG triggered successfully")
-        st.success("✅ Refresh pipeline started successfully")
-        
-        # Give Airflow time to register the DAG run
-        time.sleep(3)
-        
-        # Monitor the pipeline progress
-        st.info("⏳ Monitoring pipeline progress...")
-        pipeline_timeout = 45  # 45 minutes total timeout
-        
-        pipeline_complete = monitor_dag_progress(
-            airflow_client, 
-            'refresh_data_pipeline', 
-            timeout_minutes=pipeline_timeout,
-            wait_for_all_tasks=False
-        )
-        
-        if pipeline_complete:
-            st.success("✅ Data refresh pipeline completed successfully")
-            results['overall'] = True
-        else:
-            st.warning("⚠️ Pipeline did not complete within timeout period. Check Airflow UI for details.")
-        
-    except Exception as e:
-        logger.error(f"Error in refresh pipeline: {str(e)}")
-        st.error(f"❌ Error in refresh pipeline: {str(e)}")
-    
-    return results
-
-def monitor_dag_progress(airflow_client, dag_id: str, timeout_minutes: int = 10, wait_for_all_tasks: bool = False):
-    """Monitor DAG execution progress with a progress bar and actual status checking"""
-    logger.info(f"Monitoring {dag_id} with timeout of {timeout_minutes} minutes")
-    
-    start_time = time.time()
-    timeout_seconds = timeout_minutes * 60
-    
-    st.info(f"🕐 Monitoring {dag_id} (timeout: {timeout_minutes} minutes)")
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    # Track the DAG run we're monitoring
-    monitored_run_id = None
-    
-    while time.time() - start_time < timeout_seconds:
-        try:
-            elapsed = int(time.time() - start_time)
-            
-            token = airflow_client._get_jwt_token()
-            if not token:
-                status_text.warning(f"⚠️ Lost authentication token")
-                break
-                
-            headers = {"Authorization": f"Bearer {token}"}
-            
-            # Get the latest DAG run
-            response = requests.get(
-                f"{airflow_client.base_url}/api/v2/dags/{dag_id}/dagRuns",
-                headers=headers,
-                timeout=5
-            )
-            
-            if response.status_code == 200:
-                dag_runs = response.json().get('dag_runs', [])
-                if dag_runs:
-                    # Find the most recent run that we're monitoring
-                    if monitored_run_id is None:
-                        latest_run = dag_runs[0]
-                        monitored_run_id = latest_run.get('dag_run_id')
-                        logger.info(f"Monitoring run: {monitored_run_id}")
-                        status_text.info(f"🔄 Monitoring DAG run: {monitored_run_id}")
-                    else:
-                        # Find the specific run we're monitoring
-                        latest_run = None
-                        for run in dag_runs:
-                            if run.get('dag_run_id') == monitored_run_id:
-                                latest_run = run
-                                break
-                        
-                        if latest_run is None:
-                            status_text.warning(f"⚠️ Could not find monitored run - retrying...")
-                            time.sleep(5)
-                            continue
-                    
-                    state = latest_run.get('state', 'unknown')
-                    
-                    progress = min((time.time() - start_time) / timeout_seconds, 0.9)
-                    progress_bar.progress(progress)
-                    
-                    if state == 'success':
-                        status_text.success(f"✅ {dag_id} completed successfully!")
-                        progress_bar.progress(1.0)
-                        return True
-                    elif state == 'failed':
-                        status_text.error(f"❌ {dag_id} failed!")
-                        return False
-                    elif state in ['running', 'queued']:
-                        status_text.info(f"🔄 {dag_id} is {state}... ({elapsed}s elapsed)")
-                    else:
-                        status_text.info(f"🔄 {dag_id} status: {state}... ({elapsed}s elapsed)")
-                else:
-                    status_text.info(f"🔄 Waiting for {dag_id} to start... ({elapsed}s elapsed)")
-            else:
-                status_text.warning(f"⚠️ Error checking DAG status: {response.status_code} - retrying...")
-                
-        except Exception as e:
-            status_text.warning(f"⚠️ Error monitoring {dag_id}: {str(e)} - retrying...")
-        
-        time.sleep(10)  # Check every 10 seconds
-    
-    progress_bar.progress(1.0)
-    status_text.warning(f"⏰ {dag_id} monitoring timed out after {timeout_minutes} minutes")
-    return False
-
-
-def create_refresh_button(airflow_client, selected_station: str):
-    """Create the refresh button with progress monitoring"""
-    
-    # Refresh button section
-    st.markdown("---")
-    st.markdown('<h3 style="text-align: center; color: #2c3e50;">🔄 Data Refresh (Last 24 Hours)</h3>', unsafe_allow_html=True)
-    
-    # Connection status
-    if airflow_client.connected:
-        st.success("✅ Connected to Airflow")
-    else:
-        st.error("❌ Not connected to Airflow. Please check your connection settings.")
-        st.info("💡 Make sure Airflow is running and the configuration is correct.")
-        
-        # Show manual instructions
-        st.markdown("### 🔧 Manual DAG Triggering")
-        st.markdown("""
-        Since the automatic connection is not working, you can manually trigger the DAGs using these commands:
-        
-        **To trigger the complete refresh pipeline:**
-        ```bash
-        docker-compose exec airflow-apiserver airflow dags trigger refresh_data_pipeline
-        ```
-        
-        **To trigger individual DAGs:**
-        ```bash
-        # Download data
-        docker-compose exec airflow-apiserver airflow dags trigger ftp_multi_station_download
-        
-        # Process data (after download completes)
-        docker-compose exec airflow-apiserver airflow dags trigger process_multistation_data
-        ```
-        
-        **To check DAG status:**
-        ```bash
-        docker-compose exec airflow-apiserver airflow dags state refresh_data_pipeline
-        docker-compose exec airflow-apiserver airflow dags state ftp_multi_station_download
-        docker-compose exec airflow-apiserver airflow dags state process_multistation_data
-        ```
-        """)
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    
-    with col2:
-        if st.button("🔄 Refresh Latest Data (24 Hours)", type="primary", width='stretch'):
-            # Clear any previous status messages
-            st.empty()
-            
-            # Execute refresh pipeline (this handles all monitoring internally)
-            results = refresh_data_pipeline(airflow_client, selected_station)
-            
-            if results['overall']:
-                st.success("🎉 Data refresh pipeline completed successfully!")
-                st.info("💡 Refreshing dashboard with latest data...")
-                
-                # Force refresh of cached data
-                st.cache_data.clear()
-                time.sleep(2)  # Give a moment for the success message to be visible
-                st.rerun()
-            else:
-                st.warning("⚠️ Pipeline did not complete successfully. Check Airflow UI for details.")
-    
-    # Add cache clearing button for manual use
-    with col1:
-        if st.button("🧹 Clear Cache", type="secondary", help="Clear dashboard cache to detect new data"):
-            st.cache_data.clear()
-            st.success("✅ Cache cleared!")
-            st.info("💡 Refreshing page...")
-            time.sleep(1)
-            st.rerun()
-    
-    with col3:
-        if st.button("🔄 Force Refresh", type="secondary", help="Force refresh the entire dashboard"):
-            st.cache_data.clear()
-            st.rerun()
-    
-# =============================================================================
-# OPTIMIZED AIRFLOW INTEGRATION
-# =============================================================================
-
-@st.cache_data(ttl=60)  # Cache config for 1 minute (reduced for faster updates)
-def load_airflow_config_cached():
-    """Cached Airflow configuration loading"""
-    config_file = "airflow_config.json"
-    
-    default_config = {
-        "airflow": {
-            "base_url": "http://localhost:8080",
-            "username": "admin",
-            "password": "admin",
-            "timeout_minutes": {"download": 60, "process": 30}
-        },
-        "dags": {
-            "download_dag": "ftp_multi_station_download",
-            "process_dag": "process_multistation_data"
-        }
-    }
-    
-    try:
-        if os.path.exists(config_file):
-            with open(config_file, 'r') as f:
-                file_config = json.load(f)
-                default_config.update(file_config)
-    except Exception as e:
-        st.warning(f"⚠️ Could not load Airflow config: {str(e)}")
-    
-    # Override with environment variables
-    airflow_config = default_config.get("airflow", {})
-    airflow_config["base_url"] = os.getenv("AIRFLOW_BASE_URL", airflow_config.get("base_url", "http://localhost:8080"))
-    airflow_config["username"] = os.getenv("AIRFLOW_USERNAME", airflow_config.get("username", "admin"))
-    airflow_config["password"] = os.getenv("AIRFLOW_PASSWORD", airflow_config.get("password", "admin"))
-    
-    return default_config
-
-class AirflowClientOptimized:
-    """Optimized Airflow client with JWT authentication"""
-    
-    def __init__(self, config: Dict = None):
-        if config is None:
-            config = load_airflow_config_cached()
-        
-        airflow_config = config.get('airflow', {})
-        self.base_url = airflow_config.get('base_url', 'http://localhost:8080').rstrip('/')
-        self.username = airflow_config.get('username', 'admin')
-        self.password = airflow_config.get('password', 'admin')
-        self.timeout_minutes = airflow_config.get('timeout_minutes', {'download': 5, 'process': 10})
-        
-        # Cache connection status and JWT token
-        self._connection_status = None
-        self._connection_check_time = 0
-        self._jwt_token = None
-        self._token_expiry = 0
-    
-    @property
-    def connected(self):
-        """Cached connection status"""
-        current_time = time.time()
-        if self._connection_status is None or (current_time - self._connection_check_time) > 60:  # Check every minute
-            self._connection_status = self._test_connection()
-            self._connection_check_time = current_time
-        return self._connection_status
-    
-    def _get_jwt_token(self):
-        """Get JWT token for authentication"""
-        current_time = time.time()
-        
-        # Check if we have a valid token
-        if self._jwt_token and current_time < self._token_expiry:
-            return self._jwt_token
-        
-        try:
-            # Request new JWT token
-            token_url = f"{self.base_url}/auth/token"
-            token_data = {
-                "username": self.username,
-                "password": self.password
-            }
-            
-            response = requests.post(token_url, json=token_data, timeout=10)
-            if response.status_code in [200, 201]:
-                token_response = response.json()
-                self._jwt_token = token_response.get('access_token')
-                
-                # Set token expiry (JWT tokens typically last 24 hours)
-                self._token_expiry = current_time + (24 * 60 * 60)
-                
-                return self._jwt_token
-            else:
-                print(f"Token request failed: {response.status_code} - {response.text}")
-                return None
-                
-        except Exception as e:
-            print(f"Error getting JWT token: {e}")
-            return None
-    
-    def _test_connection(self):
-        """Test connection with JWT authentication"""
-        try:
-            token = self._get_jwt_token()
-            if not token:
-              return False
-    
-            headers = {"Authorization": f"Bearer {token}"}
-            response = requests.get(f"{self.base_url}/api/v2/dags", headers=headers, timeout=5)
-            return response.status_code == 200
-
-        except Exception as e:
-            print(f"Connection test failed: {e}")
-            return False
-    
-    def trigger_dag(self, dag_id: str, conf: Optional[Dict] = None) -> bool:
-        """Optimized DAG triggering with JWT authentication"""
-        logger.info(f"Attempting to trigger DAG: {dag_id}")
-        try:
-            token = self._get_jwt_token()
-            if not token:
-                logger.error("Failed to get authentication token")
-                st.error("❌ Failed to get authentication token")
-                return False
-                
-            url = f"{self.base_url}/api/v2/dags/{dag_id}/dagRuns"
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            }
-            
-            request_body = {
-                "logical_date": datetime.now().isoformat() + "Z",
-                "dag_run_id": f"manual_trigger_{int(time.time())}"
-            }
-            
-            if conf:
-                request_body["conf"] = conf
-            
-            logger.info(f"POST {url}")
-            logger.debug(f"Request body: {request_body}")
-            response = requests.post(url, json=request_body, headers=headers, timeout=10)
-            logger.info(f"Response status: {response.status_code}")
-            logger.debug(f"Response text: {response.text}")
-            
-            success = response.status_code in [200, 201]
-            logger.info(f"Trigger DAG {dag_id} result: {success}")
-            return success
-        
-        except Exception as e:
-            logger.error(f"Error triggering DAG {dag_id}: {str(e)}", exc_info=True)
-            st.error(f"❌ Error triggering DAG {dag_id}: {str(e)}")
-        return False
 
 # =============================================================================
 # MAIN DASHBOARD LOGIC
 # =============================================================================
-
-# Check if we should clear cache (e.g., after initial setup completion)
-def should_clear_cache():
-    """Check if we should clear cache based on recent DAG runs"""
-    try:
-        # Check if initial_data_setup DAG completed recently (within last 10 minutes)
-        import time
-        import os
-        
-        # Look for recent completion markers or check DAG status
-        # This is a simple heuristic - in production you might want to check Airflow API
-        cache_clear_file = "logs/dashboard/cache_clear_needed"
-        if os.path.exists(cache_clear_file):
-            # Check if file is recent (within last 10 minutes)
-            file_mtime = os.path.getmtime(cache_clear_file)
-            if time.time() - file_mtime < 600:  # 10 minutes
-                os.remove(cache_clear_file)  # Remove the marker
-                return True
-    except:
-        pass
-    return False
-
-# Clear cache if needed
-if should_clear_cache():
-    st.cache_data.clear()
 
 # Get available stations (cached)
 available_stations = get_available_stations_cached()
@@ -833,84 +466,66 @@ if not available_stations:
     st.markdown("""
     ## 🚀 Fresh Installation Detected
     
-    It looks like this is a fresh installation with no data yet. Here's how to get started:
+    It looks like this is a fresh installation with no data yet.
     
-    ### Option 1: Automatic Setup (Recommended)
+    ### 📋 Getting Started
+    
+    To populate the dashboard with data, use Airflow to trigger the data pipeline:
+    
+    **Using Airflow UI:**
+    1. Access Airflow at `http://localhost:8080`
+    2. Trigger the `initial_data_setup` or `refresh_data_pipeline` DAG
+    
+    **Using Command Line:**
+    ```bash
+    # Trigger the complete refresh pipeline
+    docker-compose exec airflow-apiserver airflow dags trigger refresh_data_pipeline
+    
+    # Or trigger the initial setup (for fresh installs)
+    docker-compose exec airflow-apiserver airflow dags trigger initial_data_setup
+    ```
+    
+    **Data Pipeline Process:**
+    1. 📥 Downloads raw data from FTP servers
+    2. 🔄 Processes data into dashboard format
+    3. ✅ Verifies data quality
+    
+    **Note:** This process may take 15-60 minutes depending on data size and number of stations.
+    
+    The dashboard will automatically detect new data when it becomes available.
     """)
-    
-    # Add manual cache clearing option
-    st.markdown("### 🔧 Manual Cache Management")
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("🧹 Clear Dashboard Cache", type="secondary"):
-            st.cache_data.clear()
-            st.success("✅ Dashboard cache cleared!")
-            st.info("💡 Refreshing page to detect any new data...")
-            time.sleep(1)
-            st.rerun()
-    
-    with col2:
-        if st.button("🔄 Force Refresh Page", type="secondary"):
-            st.rerun()
-    
-    if st.button("🔄 Initialize Data Pipeline", type="primary", width='stretch'):
-        st.info("🔄 This will trigger the initial data setup DAG. Please wait...")
-        
-        try:
-            airflow_client = AirflowClientOptimized()
-            if airflow_client.connected:
-                success = airflow_client.trigger_dag('initial_data_setup')
-                if success:
-                    st.success("✅ Initial data setup DAG triggered successfully!")
-                    st.markdown("""
-                    **🔄 Data Pipeline Started**
-                    
-                    The system is now:
-                    1. 📥 Downloading raw data from FTP servers
-                    2. 🔄 Processing data into dashboard format
-                    3. ✅ Verifying data quality
-                    
-                    **This process may take 15-60 minutes depending on data size and number of stations.**
-                    
-                    **Please refresh this page in a few minutes to see the results.**
-                    """)
-                    
-                    # Clear all caches to ensure fresh data detection
-                    st.cache_data.clear()
-                    st.info("🧹 Dashboard cache cleared - will detect new data when available")
-                    
-                    if st.button("🔄 Refresh Page Now", type="secondary"):
-                        st.rerun()
-                else:
-                    st.error("❌ Failed to trigger initial data setup DAG")
-            else:
-                st.error("❌ Not connected to Airflow")
-        except Exception as e:
-            st.error(f"❌ Error: {str(e)}")
     
     st.stop()
 
-# Get station metadata (cached)
+# Get station metadata (cached) - single lookup
 station_metadata = get_station_metadata_cached(available_stations)
 
-# Station selector
-col1, col2, col3 = st.columns([1, 2, 1])
-with col2:
-    selected_station = st.selectbox(
+# Pre-filter station metadata for selected station (optimization)
+def get_station_info(station_name, metadata_df):
+    """Fast station info lookup"""
+    filtered = metadata_df[metadata_df['station'].str.lower() == station_name.lower()]
+    if not filtered.empty:
+        return {
+            'latitude': filtered['latitude'].values[0],
+            'longitude': filtered['longitude'].values[0]
+        }
+    return None
+
+# Station selector - Radio buttons in horizontal layout
+st.markdown("---")
+st.markdown('<h3 style="text-align: center; color: #2c3e50; margin-bottom: 1rem;">📡 Select Station</h3>', unsafe_allow_html=True)
+
+# Create radio buttons for station selection
+selected_station = st.radio(
         "Select Station:",
         options=available_stations,
-        index=0,
-        format_func=lambda x: x.upper()
-    )
+    format_func=lambda x: x.upper(),
+    horizontal=True,
+    label_visibility="collapsed"
+)
 
-st.markdown(f'<h2 class="station-header">Station: {selected_station.upper()} (Last 24 Hours)</h2>', unsafe_allow_html=True)
-
-# Initialize optimized Airflow client
-airflow_client = AirflowClientOptimized()
-
-# Create refresh button section
-create_refresh_button(airflow_client, selected_station)
+st.markdown("---")
+st.markdown(f'<h2 class="station-header">Station: {selected_station.upper()}</h2>', unsafe_allow_html=True)
 
 # Load data for selected station (cached) with loading indicator
 with st.spinner(f"Loading data for station {selected_station.upper()}..."):
@@ -923,20 +538,31 @@ if data_dict is not None and len(data_dict) > 0:
     # Display file information - optimized
     file_info = []
     for data_type, df in data_dict.items():
-        timestamp_col = 'TIMESTAMP'
         time_range = "N/A"
-        if timestamp_col in df.columns and pd.api.types.is_datetime64_any_dtype(df[timestamp_col]):
-            # Use faster min/max operations
-            time_min = df[timestamp_col].min()
-            time_max = df[timestamp_col].max()
-            time_range = f"{time_min.strftime('%m-%d %H:%M')} to {time_max.strftime('%m-%d %H:%M')}"
+        
+        # Fast timestamp range calculation
+        if 'TIMESTAMP' in df.columns and pd.api.types.is_datetime64_any_dtype(df['TIMESTAMP']):
+            try:
+                # Use numpy for faster min/max
+                timestamps = df['TIMESTAMP'].values
+                time_min = pd.Timestamp(timestamps.min())
+                time_max = pd.Timestamp(timestamps.max())
+                
+                # Check for NaT (Not a Time) values before formatting
+                if pd.notna(time_min) and pd.notna(time_max):
+                    time_range = f"{time_min.strftime('%m-%d %H:%M')} to {time_max.strftime('%m-%d %H:%M')}"
+            except:
+                time_range = "Invalid timestamps"
         
         # Get file modification time more efficiently
-        try:
-            file_path = df['file_path'].iloc[0] if 'file_path' in df.columns else ""
-            last_modified = datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%m-%d %H:%M') if file_path else "N/A"
-        except:
-            last_modified = "N/A"
+        last_modified = "N/A"
+        if 'file_path' in df.columns:
+            try:
+                file_path = df['file_path'].iat[0]  # iat is faster than iloc for single value
+                if file_path and os.path.exists(file_path):
+                    last_modified = datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%m-%d %H:%M')
+            except:
+                pass
             
         file_info.append({
             'Data Type': data_type,
@@ -946,21 +572,25 @@ if data_dict is not None and len(data_dict) > 0:
             'Last Modified': last_modified
         })
     
-    # Display metrics
-    cols = st.columns(len(file_info))
-    for i, row in enumerate(file_info):
-        with cols[i]:
-            st.metric(
-                label=f"{row['Data Type']} Data",
-                value=f"{row['Records']:,}",
-                delta=f"{row['Columns']} cols"
-            )
-            st.caption(f"Updated: {row['Last Modified']}")
+    # Display metrics in columns
+    if file_info:
+        cols = st.columns(len(file_info))
+        for i, row in enumerate(file_info):
+            with cols[i]:
+                st.metric(
+                    label=f"{row['Data Type']} Data",
+                    value=f"{row['Records']:,}",
+                    delta=f"{row['Columns']} cols"
+                )
+                st.caption(f"Updated: {row['Last Modified']}")
 
     # Data Visualization Section
     st.header("📈 Real-time Data Visualization")
     col1, col2, col3 = st.columns([1, 1, 1])
 
+    # Get station location info once for all visualizations
+    station_info = get_station_info(selected_station, station_metadata)
+    
     # Column 1: Solar Data (SD)
     with col1:
         st.subheader("☀️ Solar Data (SD)")
@@ -969,18 +599,17 @@ if data_dict is not None and len(data_dict) > 0:
             df = data_dict['SD'].copy()
             
             # Get station metadata for clear sky calculation (only if needed)
-            if any('glo' in var.lower() for var in df.columns):
-                filtered_row = station_metadata[station_metadata['station'].str.lower() == selected_station.lower()]
-
-            if not filtered_row.empty:
+            if station_info and any('glo' in var.lower() for var in df.columns):
                 try:
-                    latitude = filtered_row['latitude'].values[0]
-                    longitude = filtered_row['longitude'].values[0]
-                    
                     # Apply clear sky model (cached) - only for solar data
-                    df = calculate_clearsky_ineichen_cached(df, latitude, longitude, tz='America/Sao_Paulo')
-                except Exception as e:
-                    st.warning(f"⚠️ Could not calculate clear sky data: {str(e)}")
+                    df = calculate_clearsky_ineichen_cached(
+                        df, 
+                        station_info['latitude'], 
+                        station_info['longitude'], 
+                        tz='America/Sao_Paulo'
+                    )
+                except Exception:
+                    pass  # Silently skip clear sky if it fails
             
             available_vars = get_available_variables_optimized(df)
             
@@ -1066,29 +695,27 @@ if data_dict is not None and len(data_dict) > 0:
     with col3:
         st.subheader("🔍 Detailed View")
         
-        # Collect variables for detailed view
+        # Collect variables for detailed view - optimized
         detailed_variables = []
         
         if 'SD' in data_dict:
-            df_sd = data_dict['SD'].copy()
-            
-            # Apply clear sky calculation if needed (only for solar data)
-            if any('glo' in var.lower() for var in df_sd.columns):
-                filtered_row = station_metadata[station_metadata['station'].str.lower() == selected_station.lower()]
-            if not filtered_row.empty:
-                try:
-                        latitude = filtered_row["latitude"].values[0]
-                        longitude = filtered_row["longitude"].values[0]
-                        df_sd = calculate_clearsky_ineichen_cached(df_sd, latitude, longitude, tz="America/Sao_Paulo")
-                except:
-                        pass                        
+            # Reference the existing df instead of copying
+            df_sd = data_dict['SD']
             
             available_vars_sd = get_available_variables_optimized(df_sd)
             
-            # Add variables to detailed view
-            solar_vars = [var for var in available_vars_sd if any(x in var.lower() for x in ['glo', 'dir', 'dif']) and any(x in var.lower() for x in ['avg', 'std'])]
+            # Add variables to detailed view - use set operations for faster checking
+            solar_keywords = {'glo', 'dir', 'dif'}
+            stat_keywords = {'avg', 'std'}
+            
+            solar_vars = [
+                var for var in available_vars_sd 
+                if any(kw in var.lower() for kw in solar_keywords) 
+                and any(kw in var.lower() for kw in stat_keywords)
+            ]
             detailed_variables.extend([f"SD: {var}" for var in solar_vars])
             
+            # Add clearsky variables if they exist
             clearsky_vars = ['clearsky_GHI', 'clearsky_DNI', 'clearsky_DHI']
             available_clearsky_vars = [var for var in clearsky_vars if var in df_sd.columns]
             detailed_variables.extend([f"SD: {var}" for var in available_clearsky_vars])
@@ -1102,52 +729,141 @@ if data_dict is not None and len(data_dict) > 0:
             
             if selected_detailed_var:
                 data_type, var_name = selected_detailed_var.split(": ", 1)
-                df_detail = data_dict[data_type].copy()
+                df_detail = data_dict[data_type]
                 
                 if 'TIMESTAMP' in df_detail.columns and var_name in df_detail.columns:
                     st.write(f"**{var_name} ({data_type})**")
                     
-                    plot_data = df_detail[['TIMESTAMP', var_name]].set_index('TIMESTAMP')
-                    st.line_chart(plot_data, height=400, width='stretch')
+                    # Optimize plot data preparation
+                    plot_data = df_detail.loc[:, ['TIMESTAMP', var_name]].dropna()
                     
-                    # Show statistics
-                    col_stat1, col_stat2 = st.columns(2)
-                    with col_stat1:
-                        st.metric("Mean", f"{df_detail[var_name].mean():.2f}")
-                        st.metric("Min", f"{df_detail[var_name].min():.2f}")
-                    with col_stat2:
-                        st.metric("Max", f"{df_detail[var_name].max():.2f}")
-                        st.metric("Std Dev", f"{df_detail[var_name].std():.2f}")
+                    if not plot_data.empty:
+                        plot_data = plot_data.set_index('TIMESTAMP')
+                        
+                        # Downsample if too many points
+                        if len(plot_data) > 2000:
+                            step = len(plot_data) // 2000
+                            plot_data = plot_data.iloc[::step]
+                        
+                        st.line_chart(plot_data, height=400, use_container_width=True)
+                        
+                        # Show statistics - use numpy for faster calculations
+                        var_data = df_detail[var_name].dropna()
+                        if len(var_data) > 0:
+                            col_stat1, col_stat2 = st.columns(2)
+                            with col_stat1:
+                                st.metric("Mean", f"{var_data.mean():.2f}")
+                                st.metric("Min", f"{var_data.min():.2f}")
+                            with col_stat2:
+                                st.metric("Max", f"{var_data.max():.2f}")
+                                st.metric("Std Dev", f"{var_data.std():.2f}")
+                    else:
+                        st.warning("No valid data to display")
         else:
             st.info("No variables available for detailed view.")
 
-    # Raw Data Section (collapsible)
+    # Raw Data Section (collapsible) - optimized for performance
     with st.expander("📋 Raw Data (Click to expand)"):
         for data_type, df in data_dict.items():
             st.write(f"**{selected_station.upper()} - {data_type} Data**")
-            st.write(f"Shape: {df.shape}")
-            st.dataframe(df.head(20), width='stretch')
+            st.write(f"Shape: {df.shape[0]:,} rows × {df.shape[1]} columns")
+            
+            # Only show first 50 rows for better performance
+            display_df = df.head(50)
+            
+            # Select only important columns to display (exclude metadata)
+            cols_to_show = [col for col in display_df.columns if col not in {'source_file', 'station', 'data_type', 'file_path'}]
+            if cols_to_show:
+                st.dataframe(display_df[cols_to_show], use_container_width=True, height=300)
+            else:
+                st.dataframe(display_df, use_container_width=True, height=300)
 
 else:
-    st.error(f"❌ No data files found for station '{selected_station.upper()}'")
-    st.warning("🚨 **Data Download Failed**")
-    st.markdown("""
-    **This station failed to download data from the FTP server.**
+    st.error(f"❌ No recent data available for station '{selected_station.upper()}'")
     
-    **Possible causes:**
-    - FTP connection issues
-    - Station data not available on the server
-    - Network connectivity problems
-    - Server-side data processing errors
+    # Check if files exist but data is old - optimized with pathlib
+    station_path = Path("data/interim") / selected_station
     
-    **What to do:**
-    1. Check the Airflow logs for download errors
-    2. Verify FTP connection settings
-    3. Try running the download pipeline again
-    4. Contact system administrator if the issue persists
-    
-    **Note:** No sample data will be created. Only real data from the FTP server is used.
-    """)
+    if station_path.exists():
+        # Use pathlib for faster file listing
+        parquet_files = list(station_path.glob("*.parquet"))
+        
+        if parquet_files:
+            # Files exist but no data in last 72 hours
+            st.warning("📅 **Data is Outdated**")
+            st.markdown(f"""
+            **Station {selected_station.upper()} has data files, but no data from the last 72 hours.**
+            
+            **Situation:**
+            - ✅ Data files exist: {len(parquet_files)} file(s) found
+            - ⚠️ All data is older than 72 hours
+            - 📊 Dashboard only displays data from the last 72 hours
+            
+            **Most recent file:**
+            """)
+            
+            # Show most recent file info - optimized
+            try:
+                latest_file = max(parquet_files, key=lambda f: f.stat().st_mtime)
+                file_mtime = datetime.fromtimestamp(latest_file.stat().st_mtime)
+                hours_old = (datetime.now() - file_mtime).total_seconds() / 3600
+                
+                st.info(f"""
+                📁 **{latest_file.name}**
+                - Last modified: {file_mtime.strftime('%Y-%m-%d %H:%M:%S')}
+                - Age: {hours_old:.1f} hours ({hours_old/24:.1f} days)
+                """)
+            except Exception as e:
+                st.warning(f"Could not read file information: {e}")
+            
+            st.markdown("""
+            **Possible causes:**
+            - Station is not currently transmitting data
+            - FTP server has not received recent data from this station
+            - Station equipment may be offline or malfunctioning
+            
+            **What to do:**
+            1. Check if the station is operational
+            2. Verify the FTP server has recent data for this station
+            3. Run the download pipeline via Airflow to get any new data
+            4. Contact station operators if the station appears to be offline
+            """)
+        else:
+            # Directory exists but no parquet files
+            st.warning("🚨 **No Data Files Found**")
+            st.markdown("""
+            **No processed data files exist for this station.**
+            
+            **Possible causes:**
+            - Data processing pipeline has not completed yet
+            - Processing failed for this station
+            
+            **What to do:**
+            1. Check Airflow logs for processing errors
+            2. Run the processing pipeline via Airflow
+            """)
+    else:
+        # No directory at all
+        st.warning("🚨 **Station Directory Not Found**")
+        st.markdown("""
+        **No data directory exists for this station.**
+        
+        **Possible causes:**
+        - Station has never been downloaded
+        - FTP download failed for this station
+        - Station name may be incorrect
+        
+        **What to do:**
+        1. Check Airflow logs for download/processing errors
+        2. Verify the station name is correct
+        3. Run the data pipeline via Airflow to download and process data
+        
+        **Airflow Commands:**
+        ```bash
+        # Trigger complete data refresh
+        docker-compose exec airflow-apiserver airflow dags trigger refresh_data_pipeline
+        ```
+        """)
 
 # Footer
 st.markdown("---")
