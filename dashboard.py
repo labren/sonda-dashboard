@@ -205,6 +205,66 @@ def filter_last_72_hours(df, timestamp_col='TIMESTAMP'):
     return filtered_df
 
 @st.cache_data(ttl=15)  # Cache for 15 seconds - reduced for faster detection of new data
+def get_station_data_status_cached(station):
+    """Get data freshness status for a station - CACHED
+    Returns: ('green'|'yellow'|'red', hours_old, latest_timestamp)
+    """
+    latest_files = get_latest_files_for_station_cached(station)
+    
+    if not latest_files:
+        return ('red', None, None)
+    
+    latest_timestamp = None
+    
+    # Check all data types and get the most recent timestamp
+    for data_type, file_path in latest_files.items():
+        try:
+            # Read only timestamp column for efficiency
+            df = pd.read_parquet(file_path, columns=['TIMESTAMP'], engine='pyarrow')
+            
+            if df.empty:
+                continue
+            
+            # Convert timestamps with explicit format to avoid warnings
+            if not pd.api.types.is_datetime64_any_dtype(df['TIMESTAMP']):
+                # Try standard format first, fall back to inference only if needed
+                try:
+                    df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
+                except:
+                    # If standard format fails, try ISO format
+                    try:
+                        df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], format='ISO8601', errors='coerce')
+                    except:
+                        # Last resort: let pandas infer (will generate warning if format varies)
+                        df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], errors='coerce')
+            
+            # Get max timestamp from this file
+            file_max_timestamp = df['TIMESTAMP'].max()
+            
+            if pd.notna(file_max_timestamp):
+                if latest_timestamp is None or file_max_timestamp > latest_timestamp:
+                    latest_timestamp = file_max_timestamp
+                    
+        except Exception:
+            continue
+    
+    if latest_timestamp is None:
+        return ('red', None, None)
+    
+    # Calculate hours old
+    hours_old = (datetime.now() - latest_timestamp).total_seconds() / 3600
+    
+    # Determine status
+    if hours_old < 1:  # Less than 1 hour = green (very fresh)
+        status = 'green'
+    elif hours_old <= 72:  # Within 72 hours = yellow
+        status = 'yellow'
+    else:  # Older than 72 hours = red
+        status = 'red'
+    
+    return (status, hours_old, latest_timestamp)
+
+@st.cache_data(ttl=15)  # Cache for 15 seconds - reduced for faster detection of new data
 def load_latest_data_for_station_cached(station):
     """Load data from the latest files for a specific station - CACHED (Shows available data with warnings)"""
     latest_files = get_latest_files_for_station_cached(station)
@@ -486,19 +546,88 @@ station_metadata = get_station_metadata_cached(available_stations)
 
 # Station selector - Radio buttons in horizontal layout
 st.markdown("---")
-st.markdown('<h3 style="text-align: center; color: #2c3e50; margin-bottom: 1rem;">📡 Select Station</h3>', unsafe_allow_html=True)
+st.markdown('<h3 style="text-align: center; color: #2c3e50; margin-bottom: 1rem;">📡 Select Station - Real-time Status</h3>', unsafe_allow_html=True)
+
+# Add legend for status indicators
+st.markdown("""
+<div style="text-align: center; margin-bottom: 0.8rem; font-size: 0.9rem; color: #495057; background-color: #f8f9fa; padding: 0.5rem; border-radius: 0.3rem;">
+    <span style="margin: 0 15px;"><strong>🟢 LIVE</strong> (<1h)</span>
+    <span style="margin: 0 15px;"><strong>🟡 RECENT</strong> (1-72h)</span>
+    <span style="margin: 0 15px;"><strong>🔴 OLD</strong> (>72h)</span>
+    <span style="margin: 0 15px;"><strong>⚪ NO DATA</strong></span>
+</div>
+""", unsafe_allow_html=True)
+
+# Get status for all stations (cached) with detailed info
+station_status = {}
+station_details = {}
+for station in available_stations:
+    status, hours_old, latest_timestamp = get_station_data_status_cached(station)
+    station_status[station] = status
+    station_details[station] = {
+        'hours_old': hours_old,
+        'timestamp': latest_timestamp
+    }
+
+# Function to format station name with status indicator and time info
+def format_station_name(station):
+    status = station_status.get(station, 'red')
+    details = station_details.get(station, {})
+    hours_old = details.get('hours_old')
+    
+    indicator = {
+        'green': '🟢',
+        'yellow': '🟡',
+        'red': '🔴'
+    }.get(status, '⚪')
+    
+    # Add time information
+    if hours_old is not None:
+        if hours_old < 1:
+            time_info = f"({int(hours_old * 60)}min)"
+        elif hours_old <= 24:
+            time_info = f"({hours_old:.1f}h)"
+        else:
+            time_info = f"({hours_old/24:.1f}d)"
+    else:
+        time_info = "(no data)"
+    
+    return f"{indicator} {station.upper()} {time_info}"
 
 # Create radio buttons for station selection
 selected_station = st.radio(
-        "Select Station:",
-        options=available_stations,
-    format_func=lambda x: x.upper(),
+    "Select Station:",
+    options=available_stations,
+    format_func=format_station_name,
     horizontal=True,
     label_visibility="collapsed"
 )
 
+# Show quick summary of all stations status
+status_counts = {'green': 0, 'yellow': 0, 'red': 0}
+for status in station_status.values():
+    if status in status_counts:
+        status_counts[status] += 1
+
+st.markdown(f"""
+<div style="text-align: center; margin-top: 0.5rem; font-size: 0.85rem; color: #666;">
+    Quick Summary: <strong style="color: #28a745;">{status_counts['green']} Live</strong> • 
+    <strong style="color: #ffc107;">{status_counts['yellow']} Recent</strong> • 
+    <strong style="color: #dc3545;">{status_counts['red']} Old</strong>
+</div>
+""", unsafe_allow_html=True)
+
 st.markdown("---")
-st.markdown(f'<h2 class="station-header">Station: {selected_station.upper()}</h2>', unsafe_allow_html=True)
+
+# Display station header with status
+status, hours_old, latest_timestamp = get_station_data_status_cached(selected_station)
+status_emoji = {
+    'green': '🟢',
+    'yellow': '🟡',
+    'red': '🔴'
+}.get(status, '⚪')
+
+st.markdown(f'<h2 class="station-header">{status_emoji} Station: {selected_station.upper()}</h2>', unsafe_allow_html=True)
 
 # Load data for selected station (cached) with loading indicator
 with st.spinner(f"Loading data for station {selected_station.upper()}..."):
@@ -507,6 +636,53 @@ with st.spinner(f"Loading data for station {selected_station.upper()}..."):
 # Data Overview Section
 if data_dict is not None and len(data_dict) > 0:
     st.header("📊 Data Overview")
+    
+    # Find the most recent timestamp across all data types
+    latest_timestamp_overall = None
+    latest_data_type = None
+    for data_type, df in data_dict.items():
+        if 'TIMESTAMP' in df.columns and pd.api.types.is_datetime64_any_dtype(df['TIMESTAMP']):
+            df_max = df['TIMESTAMP'].max()
+            if pd.notna(df_max):
+                if latest_timestamp_overall is None or df_max > latest_timestamp_overall:
+                    latest_timestamp_overall = df_max
+                    latest_data_type = data_type
+    
+    # Display prominent "Last Update" box at the top
+    if latest_timestamp_overall is not None:
+        hours_old = (datetime.now() - latest_timestamp_overall).total_seconds() / 3600
+        
+        # Create a prominent styled box for last update
+        if hours_old < 1:
+            bg_color = "#d4edda"
+            border_color = "#28a745"
+            icon = "🟢"
+            status_label = "LIVE"
+        elif hours_old <= 72:
+            bg_color = "#fff3cd"
+            border_color = "#ffc107"
+            icon = "🟡"
+            status_label = "RECENT"
+        else:
+            bg_color = "#f8d7da"
+            border_color = "#dc3545"
+            icon = "🔴"
+            status_label = "OLD"
+        
+        st.markdown(f"""
+        <div style="background-color: {bg_color}; padding: 1rem; border-radius: 0.5rem; 
+                    border-left: 5px solid {border_color}; margin-bottom: 1rem; text-align: center;">
+            <div style="font-size: 0.9rem; font-weight: bold; color: #495057; margin-bottom: 0.3rem;">
+                {icon} DATA STATUS: {status_label}
+            </div>
+            <div style="font-size: 1.5rem; font-weight: bold; color: #212529;">
+                📅 {latest_timestamp_overall.strftime('%Y-%m-%d')} ⏰ {latest_timestamp_overall.strftime('%H:%M:%S')}
+            </div>
+            <div style="font-size: 0.85rem; color: #6c757d; margin-top: 0.3rem;">
+                Last update: {hours_old:.1f}h ago ({hours_old/24:.1f} days) • Source: {latest_data_type}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
     # Display file information - optimized
     file_info = []
