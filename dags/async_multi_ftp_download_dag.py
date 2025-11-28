@@ -120,7 +120,7 @@ with DAG(
         'retry_delay': timedelta(seconds=30),  # 30 seconds delay between retries
     },
     start_date=datetime(2025, 1, 1),
-    schedule='@daily',
+    schedule=None,  # Triggered by refresh_data_pipeline
     catchup=False,
     tags=['ftp', 'data_download', 'multi_station'],
     description='Download data from multiple FTP stations in parallel'

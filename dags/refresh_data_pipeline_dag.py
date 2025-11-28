@@ -279,7 +279,7 @@ with DAG(
     'refresh_data_pipeline',
     default_args=DEFAULT_ARGS,
     description='Orchestrates the complete data refresh pipeline: download then process',
-    schedule=None,  # Manual trigger only
+    schedule='@hourly',  # Run every hour
     catchup=False,
     tags=['refresh', 'pipeline', 'orchestration', 'dashboard'],
     max_active_runs=1,  # Only one refresh at a time

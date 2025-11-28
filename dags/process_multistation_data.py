@@ -213,7 +213,7 @@ with DAG(
         'start_date': datetime(2025, 1, 1),
     },
     description='Process raw data to interim format for multiple stations and sources',
-    schedule='@daily',
+    schedule=None,  # Triggered by download DAG
     catchup=False,
     tags=['solar_data', 'multi_station', 'multi_source']
 ) as dag:
