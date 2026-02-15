@@ -8,16 +8,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import json
 from sonda_translator.sdt.carregaCabecalhos import carregaCabecalhos
-
-# Paths & config
-RAW_DIR, INTERIM_DIR = Path("data/raw"), Path("data/interim")
-CONFIG_FILE = '/opt/airflow/config_files/stations_download_config.json'
+from config import STATIONS_CONFIG, RAW_DIR, INTERIM_DIR
 _, header_sensor = carregaCabecalhos()
 
 @task
 def set_config():
     """Read config"""
-    with open(CONFIG_FILE) as f:
+    with open(str(STATIONS_CONFIG)) as f:
         return json.load(f)
 
 @task
@@ -31,9 +28,9 @@ def get_processing_tasks(config):
             for f in v['files']]
 
 @task
-def extract_raw(task):
+def extract_raw(task_info):
     """Extract raw data"""
-    s, ft, ip, op = task['station'], task['file_type'], Path(task['input_path']), task['output_path']
+    s, ft, ip, op = task_info['station'], task_info['file_type'], Path(task_info['input_path']), task_info['output_path']
     RAW_DIR.mkdir(exist_ok=True)
     INTERIM_DIR.mkdir(exist_ok=True)
 
@@ -88,7 +85,7 @@ with DAG(
     start, end = EmptyOperator(task_id='start'), EmptyOperator(task_id='end')
     cfg = set_config()
     tasks = get_processing_tasks(cfg)
-    extracted = extract_raw.expand(task=tasks)
+    extracted = extract_raw.expand(task_info=tasks)
     transformed = transform.expand(extracted=extracted)
     saved = save.expand(data=transformed)
     start >> cfg >> tasks >> extracted >> transformed >> saved >> end 

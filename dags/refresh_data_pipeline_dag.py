@@ -8,6 +8,7 @@ import time
 import logging
 import requests
 import os
+from config import RAW_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +24,11 @@ def _get_auth_token(base_url, username, password):
 def _verify_recent_files():
     """Check for files modified in last 5 min"""
     try:
-        raw_dir = Path("/opt/airflow/data/raw")
-        if not raw_dir.exists():
+        if not RAW_DIR.exists():
             return False
         cutoff = datetime.now() - timedelta(minutes=5)
         return any(f.stat().st_mtime > cutoff.timestamp()
-                  for station in raw_dir.iterdir() if station.is_dir()
+                  for station in RAW_DIR.iterdir() if station.is_dir()
                   for f in station.iterdir() if f.is_file())
     except:
         return False

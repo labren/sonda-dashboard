@@ -4,18 +4,15 @@ from airflow.operators.empty import EmptyOperator
 from plugins.header_finder_plugin import HeaderFinderOperator, HeaderConfigUpdaterOperator
 from datetime import datetime, timedelta
 import json
-
-CONFIG_FILE = '/opt/airflow/config_files/stations_download_config.json'
-HEADER_CONFIG_FILE = '/opt/airflow/config_files/cabecalho_sensor.json'
-BASE_REMOTE = '/coleta'
+from config import STATIONS_CONFIG, HEADER_CONFIG, BASE_REMOTE
 
 
 @task
 def load_configurations():
     """Load station and header configuration files."""
-    with open(CONFIG_FILE) as f:
+    with open(str(STATIONS_CONFIG)) as f:
         stations = json.load(f)
-    with open(HEADER_CONFIG_FILE) as f:
+    with open(str(HEADER_CONFIG)) as f:
         headers = json.load(f)
     return {'stations_config': stations, 'header_config': headers}
 
@@ -60,7 +57,7 @@ def update_header_configuration(found_headers: list):
         return "No headers to update"
     result = HeaderConfigUpdaterOperator(
         task_id='update_header_configuration',
-        new_headers=valid, config_file_path=HEADER_CONFIG_FILE
+        new_headers=valid, config_file_path=str(HEADER_CONFIG)
     ).execute()
     print(f"Header configuration update result: {result}")
     return result

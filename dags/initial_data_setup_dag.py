@@ -9,13 +9,9 @@ from collections import deque
 from pathlib import Path
 import json
 import time
+from config import FTP_CONN_ID, STATIONS_CONFIG, BASE_REMOTE, RAW_DIR, INTERIM_DIR
 
-FTP_CONN_ID = 'solter.ftp.1'
 DAYS_TO_KEEP = 1
-CONFIG_FILE = '/opt/airflow/config_files/stations_download_config.json'
-BASE_REMOTE = '/coleta'
-RAW_DIR = Path('/opt/airflow/data/raw')
-INTERIM_DIR = Path('/opt/airflow/data/interim')
 STATIONS = ['ptr', 'cpa', 'sms', 'nat', 'cgr', 'orn', 'sjc', 'cai', 'pma', 'stm']
 LINES_PER_DAY = 60 * 24  # 1-minute intervals
 
@@ -28,7 +24,7 @@ def _has_files(directory, pattern, min_size=0):
 @task
 def set_config():
     """Read configuration from file."""
-    with open(CONFIG_FILE) as f:
+    with open(str(STATIONS_CONFIG)) as f:
         return json.load(f)
 
 

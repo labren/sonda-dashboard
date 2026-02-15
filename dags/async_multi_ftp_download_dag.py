@@ -6,21 +6,20 @@ from datetime import datetime, timedelta
 from collections import deque
 import os
 import json
+from config import FTP_CONN_ID, STATIONS_CONFIG, BASE_REMOTE, RAW_DIR
 
-# Constants
-FTP_CONN_ID, DAYS_TO_KEEP = 'solter.ftp.1', 3
-CONFIG_FILE, BASE_REMOTE, BASE_LOCAL = '/opt/airflow/config_files/stations_download_config.json', '/coleta', '/opt/airflow/data/raw'
+DAYS_TO_KEEP = 3
 
 @task
 def set_config():
     """Read configuration"""
-    with open(CONFIG_FILE) as f:
+    with open(str(STATIONS_CONFIG)) as f:
         return json.load(f)
 
 @task
 def get_station_files(config):
     """Get station files list"""
-    return [{'station': k, 'remote_file': f"{BASE_REMOTE}/{k}/data/{f}", 'local_file': f"{BASE_LOCAL}/{k}/{f}"}
+    return [{'station': k, 'remote_file': f"{BASE_REMOTE}/{k}/data/{f}", 'local_file': f"{str(RAW_DIR)}/{k}/{f}"}
             for k, v in config.items() for f in v['files']]
 
 @task(retries=5, retry_delay=timedelta(seconds=120), max_retry_delay=timedelta(hours=2))
