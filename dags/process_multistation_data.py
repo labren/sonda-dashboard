@@ -1,240 +1,94 @@
 from airflow import DAG
 from airflow.decorators import task
 from airflow.operators.empty import EmptyOperator
-
 from plugins.file_saver_plugin import FileSaverOperator
 from plugins.raw_data_loader_plugin import RawDataLoaderOperator
 from plugins.data_transformer_plugin import DataTransformerOperator
-
 from datetime import datetime, timedelta
-import os
+from pathlib import Path
 import json
-
 from sonda_translator.sdt.carregaCabecalhos import carregaCabecalhos
 
-# Set base paths
-RAW_DATA_DIR = os.path.expanduser("data/raw")
-INTERIM_DATA_DIR = os.path.expanduser("data/interim")
+# Paths & config
+RAW_DIR, INTERIM_DIR = Path("data/raw"), Path("data/interim")
 CONFIG_FILE = '/opt/airflow/config_files/stations_download_config.json'
-
-# Load headers
 _, header_sensor = carregaCabecalhos()
 
 @task
 def set_config():
-    """Read configuration from file"""
-    try:
-        # Check if the file exists
-        if not os.path.exists(CONFIG_FILE):
-            raise FileNotFoundError(f"Config file {CONFIG_FILE} does not exist.")
-        
-        # Read json file
-        with open(CONFIG_FILE, 'r') as f:
-            config = json.load(f)
-        
-        print("Successfully read config file")
-        return config
-        
-    except Exception as e:
-        print(f"Error reading config file: {str(e)}")
-        raise
+    """Read config"""
+    with open(CONFIG_FILE) as f:
+        return json.load(f)
 
 @task
-def get_station_processing_tasks(config: dict) -> list:
-    """Get list of station processing tasks"""
-    processing_tasks = []
-    
-    for station_key, station_value in config.items():
-        if not station_value.get('enabled', True):
-            print(f"Skipping disabled station: {station_key}")
-            continue
-            
-        print(f"Processing station: {station_key}")
-        print(f"Station config: {station_value}")
-        
-        for file in station_value['files']:
-            # Extract file type from filename (e.g., "PTR_SD.DAT" -> "SD")
-            file_type = file.split('_')[1].split('.')[0]
-            
-            # Create station-specific output directory
-            station_output_dir = os.path.join(INTERIM_DATA_DIR, station_key)
-            
-            processing_tasks.append({
-                'station': station_key,
-                'file_type': file_type,
-                'filename': file,
-                'input_path': os.path.join(RAW_DATA_DIR, station_key, file),
-                'output_path': os.path.join(station_output_dir, f'processed_data_{station_key.upper()}_{file_type}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.parquet')
-            })
-    
-    print(f"Created {len(processing_tasks)} processing tasks")
-    return processing_tasks
+def get_processing_tasks(config):
+    """Get processing tasks list"""
+    now = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return [{'station': k, 'file_type': f.split('_')[1].split('.')[0], 'filename': f,
+             'input_path': str(RAW_DIR / k / f),
+             'output_path': str(INTERIM_DIR / k / f'processed_data_{k.upper()}_{f.split("_")[1].split(".")[0]}_{now}.parquet')}
+            for k, v in config.items() if v.get('enabled', True)
+            for f in v['files']]
 
 @task
-def extract_raw_data(processing_task: dict):
-    """Extract raw data for a specific station and file type"""
-    station = processing_task['station']
-    file_type = processing_task['file_type']
-    input_path = processing_task['input_path']
-    
-    print(f"Processing raw data for station {station}, file type {file_type} from {input_path}")
-    
-    # Ensure directories exist
-    os.makedirs(RAW_DATA_DIR, exist_ok=True)
-    os.makedirs(INTERIM_DATA_DIR, exist_ok=True)
-    
-    # Check if file exists
-    if not os.path.exists(input_path):
-        print(f"Warning: File {input_path} does not exist. Skipping.")
+def extract_raw(task):
+    """Extract raw data"""
+    s, ft, ip, op = task['station'], task['file_type'], Path(task['input_path']), task['output_path']
+    RAW_DIR.mkdir(exist_ok=True)
+    INTERIM_DIR.mkdir(exist_ok=True)
+
+    if not ip.exists():
         return None
-    
-    # Check if station has header configuration
-    has_header_config = station in header_sensor and f"{file_type}_RAW_HEADER" in header_sensor[station]
-    
-    if not has_header_config:
-        print(f"Warning: Station {station} does not have header configuration for {file_type}. Processing without validation.")
-    else:
-        print(f"Info: Station {station} has header configuration for {file_type}. Processing with validation.")
-    
-    # Load raw data with enhanced validation
-    loader = RawDataLoaderOperator(
-        task_id=f'load_raw_data_{station}_{file_type}',
-        file_path=input_path,
-        station=station,
-        file_type=file_type,
-        header_sensor=header_sensor,
-        validate_columns=has_header_config  # Only validate if header config exists
-    )
-    data = loader.execute()
-    
-    if data.empty:
-        print(f"Warning: No data loaded for {station}_{file_type}")
-        return None
-    
-    return {
-        'station': station,
-        'file_type': file_type,
-        'data': data,
-        'output_path': processing_task['output_path'],
-        'has_header_config': has_header_config
-    }
+
+    has_hdr = s in header_sensor and f"{ft}_RAW_HEADER" in header_sensor[s]
+    data = RawDataLoaderOperator(task_id=f'load_{s}_{ft}', file_path=str(ip), station=s,
+                                 file_type=ft, header_sensor=header_sensor, validate_columns=has_hdr).execute()
+
+    return {'station': s, 'file_type': ft, 'data': data, 'output_path': op, 'has_hdr': has_hdr} if not data.empty else None
 
 @task
-def transform_data(extracted_data: dict):
-    """Transform data for a specific station and file type"""
-    if extracted_data is None:
+def transform(extracted):
+    """Transform data"""
+    if not extracted:
         return None
-    
-    station = extracted_data['station']
-    file_type = extracted_data['file_type']
-    data = extracted_data['data']
-    output_path = extracted_data['output_path']
-    has_header_config = extracted_data.get('has_header_config', False)
-    
-    print(f"Transforming data for station {station}, file type {file_type}")
-    
-    # If no header configuration, skip transformation but still save raw data
-    if not has_header_config:
-        print(f"Warning: Station {station} has no header configuration. Saving raw data without transformation.")
-        return {
-            'station': station,
-            'file_type': file_type,
-            'data': data,
-            'output_path': output_path,
-            'transformed': False
-        }
-    
-    # Check if station exists in header_sensor
-    if station not in header_sensor:
-        print(f"Warning: Station {station} not found in header_sensor. Skipping transformation.")
+
+    s, ft, data, op, has_hdr = extracted['station'], extracted['file_type'], extracted['data'], extracted['output_path'], extracted.get('has_hdr', False)
+
+    if not has_hdr or s not in header_sensor:
+        return {**extracted, 'transformed': False}
+
+    if ft not in [k.replace('_RAW_HEADER', '') for k in header_sensor[s].keys() if k.endswith('_RAW_HEADER')]:
         return None
-    
-    # Check if file_type exists for this station
-    if file_type not in [key.replace('_RAW_HEADER', '') for key in header_sensor[station].keys() if key.endswith('_RAW_HEADER')]:
-        print(f"Warning: File type {file_type} not found for station {station}. Skipping transformation.")
-        return None
-    
-    # Transform the data
-    transformer = DataTransformerOperator(
-        task_id=f'transform_data_{station}_{file_type}',
-        data=data,
-        station=station,
-        file_type=file_type,
-        header_sensor=header_sensor
-    )
-    transformed = transformer.execute()
-    
-    if transformed.empty:
-        print(f"Warning: No data transformed for {station}_{file_type}")
-        return None
-    
-    return {
-        'station': station,
-        'file_type': file_type,
-        'data': transformed,
-        'output_path': output_path,
-        'transformed': True
-    }
+
+    transformed = DataTransformerOperator(task_id=f'xform_{s}_{ft}', data=data, station=s,
+                                         file_type=ft, header_sensor=header_sensor).execute()
+
+    return {'station': s, 'file_type': ft, 'data': transformed, 'output_path': op, 'transformed': True} if not transformed.empty else None
 
 @task
-def save_data(transformed_data: dict):
-    """Save transformed data for a specific station and file type"""
-    if transformed_data is None:
+def save(data):
+    """Save data"""
+    if not data:
         return None
-    
-    station = transformed_data['station']
-    file_type = transformed_data['file_type']
-    data = transformed_data['data']
-    output_path = transformed_data['output_path']
-    transformed = transformed_data.get('transformed', True)
-    
-    data_type = "transformed" if transformed else "raw"
-    print(f"Saving {data_type} data for station {station}, file type {file_type} to {output_path}")
-    
-    # Save the data
-    saver = FileSaverOperator(
-        task_id=f'save_{data_type}_data_{station}_{file_type}',
-        data=data,
-        output_path=output_path,
-        file_format='parquet',
-        compression='snappy'
-    )
-    saver.execute()
-    
-    return f"Success: {station}_{file_type} ({data_type})"
+
+    FileSaverOperator(task_id=f'save_{data["station"]}_{data["file_type"]}', data=data['data'],
+                     output_path=data['output_path'], file_format='parquet', compression='snappy').execute()
+
+    return f"Success: {data['station']}_{data['file_type']}"
 
 with DAG(
     'process_multistation_data',
-    default_args={
-        'owner': 'airflow',
-        'depends_on_past': False,
-        'retries': 1,
-        'retry_delay': timedelta(minutes=2),
-        'start_date': datetime(2025, 1, 1),
-    },
-    description='Process raw data to interim format for multiple stations and sources',
-    schedule=None,  # Triggered by download DAG
+    default_args={'owner': 'airflow', 'depends_on_past': False, 'retries': 1,
+                  'retry_delay': timedelta(minutes=2), 'start_date': datetime(2025, 1, 1)},
+    description='Process raw data to interim format',
+    schedule=None,
     catchup=False,
     tags=['solar_data', 'multi_station', 'multi_source']
 ) as dag:
-    start = EmptyOperator(task_id='start')
-
-    # Get configuration
-    config = set_config()
-    
-    # Get processing tasks
-    processing_tasks = get_station_processing_tasks(config)
-    
-    # Extract raw data for all stations and file types in parallel
-    extracted_data = extract_raw_data.expand(processing_task=processing_tasks)
-    
-    # Transform data for all stations and file types in parallel
-    transformed_data = transform_data.expand(extracted_data=extracted_data)
-    
-    # Save data for all stations and file types in parallel
-    save_results = save_data.expand(transformed_data=transformed_data)
-
-    end = EmptyOperator(task_id='end')
-    
-    # Define task dependencies
-    start >> config >> processing_tasks >> extracted_data >> transformed_data >> save_results >> end 
+    start, end = EmptyOperator(task_id='start'), EmptyOperator(task_id='end')
+    cfg = set_config()
+    tasks = get_processing_tasks(cfg)
+    extracted = extract_raw.expand(task=tasks)
+    transformed = transform.expand(extracted=extracted)
+    saved = save.expand(data=transformed)
+    start >> cfg >> tasks >> extracted >> transformed >> saved >> end 
