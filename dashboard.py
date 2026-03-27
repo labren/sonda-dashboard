@@ -9,16 +9,17 @@ import pvlib
 from pvlib.location import Location
 import logging
 
-# Setup logging - minimized
-log_dir = "logs/dashboard"
-os.makedirs(log_dir, exist_ok=True)
-logging.basicConfig(
-    level=logging.WARNING,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.FileHandler(os.path.join(log_dir, f"dashboard_{datetime.now():%Y%m%d}.log"))]
-)
-for logger in ('urllib3', 'requests', 'streamlit', 'matplotlib', 'PIL', 'watchdog'):
-    logging.getLogger(logger).setLevel(logging.ERROR)
+# Setup logging
+log_dir = Path(__file__).parent / "logs" / "dashboard"
+log_dir.mkdir(parents=True, exist_ok=True)
+logger = logging.getLogger("dashboard")
+if not logger.handlers:
+    _handler = logging.FileHandler(log_dir / f"dashboard_{datetime.now():%Y%m%d}.log")
+    _handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.WARNING)
+for _noisy in ('urllib3', 'requests', 'streamlit', 'matplotlib', 'PIL', 'watchdog'):
+    logging.getLogger(_noisy).setLevel(logging.ERROR)
 
 # Page config
 st.set_page_config(page_title="Solar Data Monitor", page_icon="☀️", layout="wide", initial_sidebar_state="collapsed")
@@ -70,7 +71,7 @@ def filter_72h(df, ts_col='TIMESTAMP'):
     if ts_col not in df.columns:
         return df
     if not pd.api.types.is_datetime64_any_dtype(df[ts_col]):
-        df[ts_col] = pd.to_datetime(df[ts_col], errors='coerce')
+        df[ts_col] = pd.to_datetime(df[ts_col], format='%Y-%m-%d %H:%M:%S', errors='coerce')
     return df[df[ts_col] >= datetime.now() - timedelta(hours=72)].copy()
 
 @st.cache_data(ttl=15)
@@ -84,7 +85,7 @@ def get_data_status(station):
         try:
             df = pd.read_parquet(fpath, columns=['TIMESTAMP'])
             if not df.empty:
-                df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], errors='coerce')
+                df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
                 file_max = df['TIMESTAMP'].max()
                 if pd.notna(file_max) and (latest_ts is None or file_max > latest_ts):
                     latest_ts = file_max
@@ -109,7 +110,7 @@ def load_station_data(station):
                 continue
             # Fast timestamp conversion
             if 'TIMESTAMP' in df.columns and not pd.api.types.is_datetime64_any_dtype(df['TIMESTAMP']):
-                df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], errors='coerce', format='ISO8601')
+                df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
             # Numeric conversion - vectorized
             for col in df.select_dtypes(include=['object']).columns:
                 if col not in {'TIMESTAMP', 'source_file', 'station', 'data_type', 'file_path'}:
@@ -119,12 +120,15 @@ def load_station_data(station):
             if df_recent.empty and 'TIMESTAMP' in df.columns:
                 latest = df['TIMESTAMP'].max()
                 if pd.notna(latest):
-                    st.warning(f"⚠️ {dtype} data is {(datetime.now() - latest).total_seconds() / 3600:.0f}h old")
+                    _age = (datetime.now() - latest).total_seconds() / 3600
+                    logger.warning("Station %s dtype %s data is %.0fh old", selected, dtype, _age)
+                    st.warning(f"⚠️ {dtype} data is {_age:.0f}h old")
                 df_recent = df
             # Add metadata
             df_recent = df_recent.assign(source_file=Path(fpath).name, station=station, data_type=dtype, file_path=fpath)
             data[dtype] = df_recent
         except Exception as e:
+            logger.error("Could not load %s for station %s: %s", dtype, station, e)
             st.info(f"ℹ️ Could not load {dtype}: {str(e)[:50]}")
     return data if data else None
 
@@ -136,7 +140,7 @@ def calc_clearsky(df, lat, lon, alt=0, tz='America/Sao_Paulo'):
     df = df.copy()
     if 'TIMESTAMP' not in df.columns:
         return df
-    df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], errors='coerce').dropna()
+    df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], format='%Y-%m-%d %H:%M:%S', errors='coerce').dropna()
     if df.empty:
         return df
     if df['TIMESTAMP'].dt.tz is None:
@@ -173,6 +177,7 @@ def plot_vars(df, vars, title, height=300):
 # Main logic
 stations = get_stations()
 if not stations:
+    logger.error("No stations found in data/interim")
     st.error("❌ No stations in data/interim")
     st.markdown("""
     ## 🚀 Fresh Installation
@@ -365,6 +370,7 @@ if data_dict:
             st.write(f"**{selected.upper()} - {dt}** ({df.shape[0]}×{df.shape[1]})")
             st.dataframe(df.head(20))
 else:
+    logger.error("No data loaded for station %s", selected)
     st.error(f"❌ No data for {selected.upper()}")
 
 st.markdown("---")

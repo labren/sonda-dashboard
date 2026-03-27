@@ -1,9 +1,10 @@
 apache-airflow-providers-ftp
 pandas
-pyarrow 
+pyarrow
 duckdb
-redis==4.5.5
 streamlit
 pvlib
 timezonefinder==5.2.0
 requests
+pytest
+pytest-mock

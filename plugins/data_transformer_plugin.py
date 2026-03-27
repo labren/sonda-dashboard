@@ -100,38 +100,36 @@ class DataTransformerOperator(BaseOperator):
         if actual_columns == total_headers:
             self.log.info("Headers already applied by RawDataLoaderOperator, returning data as-is")
             return list(df.columns)
-        
-                    # If data has fewer columns than raw headers, we need to determine
-            # which subset of headers to apply
-            if actual_columns < total_headers:
-                # Try different patterns to find the right subset
-                patterns = [
-                    (8, -2),  # TOA5 pattern: skip first 8 metadata columns and last 2
-                    (0, -2),  # Skip last 2
-                    (2, None),  # Skip first 2
-                    (1, -1),  # Skip first and last
-                    (0, None),  # Use all headers
-                ]
-                
-                for start, end in patterns:
-                    if start is None:
-                        subset_headers = raw_headers[:end]
-                    elif end is None:
-                        subset_headers = raw_headers[start:]
-                    else:
-                        subset_headers = raw_headers[start:end]
-                    
-                    if len(subset_headers) == actual_columns:
-                        pattern_name = "TOA5" if (start, end) == (8, -2) else f"[{start}:{end}]"
-                        self.log.info(f"Applied {pattern_name} pattern: {len(subset_headers)} columns")
-                        return subset_headers
-            
+
+        elif actual_columns < total_headers:
+            # Try different patterns to find the right subset
+            patterns = [
+                (8, -2),  # TOA5 pattern: skip first 8 metadata columns and last 2
+                (0, -2),  # Skip last 2
+                (2, None),  # Skip first 2
+                (1, -1),  # Skip first and last
+                (0, None),  # Use all headers
+            ]
+
+            for start, end in patterns:
+                if start is None:
+                    subset_headers = raw_headers[:end]
+                elif end is None:
+                    subset_headers = raw_headers[start:]
+                else:
+                    subset_headers = raw_headers[start:end]
+
+                if len(subset_headers) == actual_columns:
+                    pattern_name = "TOA5" if (start, end) == (8, -2) else f"[{start}:{end}]"
+                    self.log.info(f"Applied {pattern_name} pattern: {len(subset_headers)} columns")
+                    return subset_headers
+
             # If no pattern works, truncate headers to match data
             self.log.warning(f"No header pattern found, truncating headers to {actual_columns} columns")
             return raw_headers[:actual_columns]
-        
-        # If data has more columns than raw headers, pad headers
+
         else:
+            # Data has more columns than raw headers — pad header list
             self.log.warning(f"Data has more columns than headers, padding headers")
             padded_headers = raw_headers.copy()
             for i in range(actual_columns - total_headers):

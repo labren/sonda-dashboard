@@ -27,7 +27,7 @@ echo ""
 
 # Start the services
 echo "🔄 Starting Airflow and Streamlit services..."
-docker-compose up -d
+docker compose up -d
 
 # Wait for services to be ready
 echo "⏳ Waiting for services to be ready..."
@@ -35,7 +35,7 @@ sleep 30
 
 # Check if services are running
 echo "🔍 Checking service status..."
-docker-compose ps
+docker compose ps
 
 # Wait for Airflow to be fully ready
 echo ""
@@ -140,14 +140,14 @@ echo ""
 echo "📋 Next Steps:"
 echo "============="
 echo ""
-echo "1. 🌐 Open the dashboard: http://localhost:8501"
+echo "1. 🌐 Open the dashboard: http://localhost:80"
 echo "2. 🔧 Open Airflow UI: http://localhost:8082"
 echo "   - Username: airflow"
 echo "   - Password: airflow"
 echo ""
 echo "3. 🚀 Initialize the data pipeline:"
 echo "   - Click the 'Initialize Data Pipeline' button in the dashboard (recommended), OR"
-echo "   - Run: docker-compose exec airflow-apiserver airflow dags trigger initial_data_setup"
+echo "   - Run: docker compose exec airflow-apiserver airflow dags trigger initial_data_setup"
 echo ""
 echo "4. 📊 Monitor progress in the Airflow UI"
 echo ""

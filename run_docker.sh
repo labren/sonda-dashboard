@@ -65,11 +65,10 @@ echo ""
 echo "🚀 Starting Docker services..."
 echo "This will start:"
 echo "  - PostgreSQL database"
-echo "  - Redis cache"
 echo "  - Airflow webserver (port 8082)"
 echo "  - Airflow scheduler"
-echo "  - Airflow workers"
-echo "  - Streamlit dashboard (port 8501)"
+echo "  - Airflow dag-processor"
+echo "  - Streamlit dashboard (port 80)"
 echo ""
 
 # Start the services
